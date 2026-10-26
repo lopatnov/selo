@@ -50,118 +50,126 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
 - **4 CPUs** available to Docker
 - **15 GB free disk space** for installation
 - **Docker login credentials** for `zetarishackathon.azurecr.io` (provided by Zetaris)
+- **Zetaris platform distribution** (downloaded from Zetaris Cloud, `zetaris-platform.zip`)
+- **Zetaris license/evaluation entitlement**
 
-### Step-by-Step Zetaris Installation
+### Step 1: Download and Prepare Zetaris Platform
 
-#### 1. Prepare Environment Files
+1. Go to [Zetaris Cloud](https://www.zetaris.com/cloud) and choose **Start Free** to open the account portal
+2. Register or sign in with your existing account
+3. Go to [Run locally page](https://cloud.enterprise.zetaris.com/dashboard/download)
+4. Download `zetaris-platform.zip` and use the registry sign-in command supplied there
+5. Move the zip out of Downloads before unpacking it
+6. Extract the archive:
+   ```bash
+   unzip zetaris-platform.zip
+   cd zetaris-platform
+   ```
 
-The project includes two environment files in the root directory:
-
-- `.env.example` - Template with all required variables
-- `.env` - Actual configuration (already populated with your credentials)
-
-**Critical variables that MUST be set before first startup:**
-
-```bash
-# Zetaris Platform Images (from C:\zetaris-platform)
-DRIVER_IMAGE=zetarishackathon.azurecr.io/zetaris-ndp-driver:2.4.3-v2.4.3.1-hackathon.cb88df0b255aba5a9a9eda96483fc877cc82df80
-API_IMAGE=zetarishackathon.azurecr.io/zetaris-ndp-api:2.4.3-v2.4.3.1-hackathon.a2848d8a41fa21673a0d719deb41b675412710fe
-UI_IMAGE=zetarishackathon.azurecr.io/zetaris-new-ui:2.4.3-v2.4.3.1-hackathon.88e49b0db015979a2d071d2d68a6865d38a39f15
-
-# Administrator Account (set BEFORE first startup)
-ZETARIS_ADMIN_EMAIL=oleksandr@lopatnov.cv.ua
-ZETARIS_ADMIN_PASSWORD=Zetaris1@
-ZETARIS_ADMIN_ORG=cruso
-
-# PostgreSQL Credentials
-POSTGRES_USER=zetaris
-POSTGRES_PASSWORD=zt-metastore-6f2a9c41d0b7
-
-# Resource Sizing
-ZSPARK_DRIVER_MEM=2g
-ZSPARK_DRIVER_CORES=2
-ZSPARK_MASTER_URL=local[2]
-ZETARIS_API_MAX_HEAP=1g
-
-# Network
-UI_PORT=3000
-ALLOWED_ORIGINS=http://localhost:3000
-GUI_URL=http://localhost:3000
-API_PORT=8888
-API_INTERNAL_PORT=8889
-DRIVER_PORT=10000
-SPARK_UI_PORT=4040
-QUERY_HTTP_PUBLISH=0
-
-# Sample Data
-ZETARIS_SEED_TPCH=true
-```
-
-#### 2. Authenticate with Zetaris Registry
+### Step 2: Authenticate with Zetaris Registry
 
 ```bash
-# From the project root directory (C:\projects\selo)
+docker version
+docker compose version
 docker login zetarishackathon.azurecr.io
-# Enter the registry credentials provided by Zetaris
+# Enter the registry credentials issued by Zetaris at the prompts
 ```
 
-#### 3. Start the Platform
+### Step 3: Run Preflight Checks
 
 ```bash
-# From project root (C:\projects\selo)
-docker-compose up --build -d
+./preflight.sh
+# Resolve every preflight failure before proceeding
+# The registry check detects a stored login configuration;
+# `docker compose pull` is the definitive check that credentials work
 ```
 
-#### 3. Verify Startup
+### Step 4: Configure Environment
+
+Edit the supplied `.env` file in an editor. Keep the issued image settings and other supplied values. Set or confirm:
+
+| Variable                 | Local value or action                                                       |
+| ------------------------ | --------------------------------------------------------------------------- |
+| `ZETARIS_ADMIN_EMAIL`    | Initial administrator email                                                 |
+| `ZETARIS_ADMIN_PASSWORD` | Your own strong password (8+ chars, lower/uppercase/digit/one of `$@!%*?&`) |
+| `ZETARIS_ADMIN_ORG`      | Initial organisation name                                                   |
+| `ZSPARK_DRIVER_MEM`      | `2g`                                                                        |
+| `ZSPARK_DRIVER_CORES`    | `2`                                                                         |
+| `ZSPARK_MASTER_URL`      | `local[2]`                                                                  |
+| `ZETARIS_API_MAX_HEAP`   | `1g`                                                                        |
+| `UI_PORT`                | `3000`                                                                      |
+| `ALLOWED_ORIGINS`        | `http://localhost:3000`                                                     |
+| `GUI_URL`                | `http://localhost:3000`                                                     |
+| `COMPOSE_PROFILES`       | Empty/unset for this local path                                             |
+| `ZETARIS_SEED_TPCH`      | `true` to retain sample data                                                |
+
+**Important**: Keep `.env` private and out of version control:
 
 ```bash
-# Check all services are running
-docker-compose ps --all
-
-# Expected output: postgres, driver, api, ui, bootstrap should be running
-# init and bootstrap should show "Exited (0)" after completion
-
-# Check logs for any issues
-docker-compose logs --tail=80 driver api bootstrap
+chmod 600 .env
+docker compose config --quiet
 ```
 
-#### 4. Verify with Built-in Verification Script
+### Step 3: Pull and Start Zetaris Platform
 
 ```bash
-# After all services show as healthy, run verification
+# From the zetaris-platform directory
+docker compose pull
+docker compose up -d
+docker compose ps --all
+```
+
+Image downloads and first startup can take time, especially on Apple Silicon. Use service readiness rather than elapsed time to decide when startup is complete.
+
+Check logs for any issues:
+
+```bash
+docker compose logs --tail=80 driver api bootstrap
+```
+
+Then verify:
+
+```bash
 ./verify.sh
 ```
 
 Expected results:
 
 - `postgres`, `driver`, `api`, `ui`, `ai-datasteward` are running
-- `init` and `bootstrap` show `Exited (0)` (successful one-time setup)
-- `verify.sh` passes all checks including login and query through UI, API, and query engine
+- `init` and `bootstrap` show `Exited (0)` (successful one-time setup jobs)
+- `verify.sh` passes all nine checks including login and query through UI, API and query engine
 
-#### 5. First Login & API Key Creation
+If bootstrap is still running, wait for it to finish and rerun the verifier. If `ui` checks fail immediately after bootstrap finishes, wait a minute and run `./verify.sh` again before troubleshooting.
 
-1. Open **http://localhost:3000** in browser
-2. Sign in with:
-   - Email: `oleksandr@lopatnov.cv.ua`
-   - Password: `Zetaris1@`
-3. **Change password immediately** from user menu (top right)
-4. Create API Key for application integration:
-   - Go to Settings → API Keys
-   - Create new key with appropriate permissions
-   - Copy the API key to your `.env` file:
-     ```bash
-     ZETARIS_API_KEY=your-generated-api-key
-     ```
+### Step 4: First Login and Initial Verification
 
-#### 5. Zetaris Service Endpoints
+1. Open <http://localhost:3000> in browser
+2. Sign in with the administrator email and password configured before bootstrap
+3. Open the SQL Editor and run:
 
-After successful startup:
+   ```sql
+   SELECT 1 AS one;
+   ```
 
-- **UI (Web Interface)**: http://localhost:3000
-- **Public API**: http://localhost:8888
-- **Internal API**: http://localhost:8889
-- **Driver (JDBC)**: jdbc:zetaris:lightning@localhost:10000
-- **Spark UI**: http://localhost:4040
+   Expect one row with value `1`. This confirms authenticated query reaches the engine.
+
+4. **Change password immediately** from user menu (top right) if using default password.
+
+### Step 5: Connect Our Application
+
+After Zetaris is running:
+
+1. Our application runs on port 3002 (Docker: 3002 -> host: 3002)
+2. Zetaris UI on port 3000
+3. Zetaris API on port 8888
+4. Configure our application's `.env` with:
+   - `ZETARIS_URL`: `http://host.docker.internal:8888` (from inside Docker)
+   - `ZETARIS_API_KEY`: API key created in Zetaris GUI
+   - `METERLESS_API_URL`: `https://api.meterless.ai/v1`
+   - `METERLESS_API_KEY`: Your Meterless API key
+
+5. Access our application at http://localhost:3002
+6. Add RSS sources, create AI personalities, start discussions
 
 ---
 
@@ -173,16 +181,16 @@ All persistent data is stored in **Docker named volumes** managed by the Zetaris
 
 | Volume          | Purpose                                        | Persistence                    |
 | --------------- | ---------------------------------------------- | ------------------------------ |
-| `pgdata`        | PostgreSQL metastore & audit databases         | Survives `docker-compose down` |
-| `customer-data` | **Our application data + Zetaris file system** | Survives `docker-compose down` |
-| `driver-data`   | Driver encryption keys, tokens, metastore      | Survives `docker-compose down` |
-| `driver-logs`   | Spark/Driver logs                              | Survives `docker-compose down` |
-| `caddy-data`    | TLS certificates (if using TLS profile)        | Survives `docker-compose down` |
-| `caddy-config`  | Caddy configuration                            | Survives `docker-compose down` |
+| `pgdata`        | PostgreSQL metastore & audit databases         | Survives `docker compose down` |
+| `customer-data` | **Our application data + Zetaris file system** | Survives `docker compose down` |
+| `driver-data`   | Driver encryption keys, tokens, metastore      | Survives `docker compose down` |
+| `driver-logs`   | Spark/Driver logs                              | Survives `docker compose down` |
+| `caddy-data`    | TLS certificates (if using TLS profile)        | Survives `docker compose down` |
+| `caddy-config`  | Caddy configuration                            | Survives `docker compose down` |
 
 ### What Data Goes Where
 
-#### Zetaris Platform Data (in `pgdata`, `driver-data`, `customer-data`):
+#### Zetaris Platform Data:
 
 - **Metastore**: Table schemas, catalog information, query history
 - **Audit Logs**: All query executions, access logs
@@ -204,7 +212,7 @@ All our application data is stored **in Zetaris** via its REST API:
 
 #### In-Memory Fallback:
 
-If Zetaris API is unavailable, the server falls back to **in-memory storage** (lost on restart). This is indicated in logs with "Fallback to in-memory storage".
+If Zetaris API is unavailable, the server falls back to **in-memory storage** (lost on restart).
 
 ---
 
@@ -247,8 +255,6 @@ If Zetaris API is unavailable, the server falls back to **in-memory storage** (l
 
 ### Manual RSS Fetch
 
-You can trigger immediate fetch via API:
-
 ```bash
 curl -X POST http://localhost:3001/api/news/fetch
 ```
@@ -262,7 +268,7 @@ curl -X POST http://localhost:3001/api/news/fetch
 ```bash
 # In .env file
 METERLESS_API_URL=https://api.meterless.ai/v1
-METERLESS_API_KEY=your-meterless-api-key
+METERLESS_API_KEY=<PII_10>
 ```
 
 ### How AI Discussions Work
@@ -289,13 +295,15 @@ METERLESS_API_KEY=your-meterless-api-key
 - **RSS Parsing**: rss-parser library
 - **Containerization**: Docker, Docker Compose
 
+---
+
 ## Project Architecture
 
 ```
 ├── server/             # Node.js Express server
 │   ├── index.js        # Main server file
 │   ├── package.json    # Server dependencies
-│   └── init/           # Zetaris init scripts (mounted to containers)
+│   └── init/           # Zetaris init scripts
 │
 ├── client/             # React frontend
 │   ├── src/            # Source files
@@ -310,49 +318,50 @@ METERLESS_API_KEY=your-meterless-api-key
 ├── docker-compose.yml  # Full orchestration
 ├── .env                # Production config
 ├── .env.example        # Template
-├── verify.sh           # Zetaris verification script
 ├── README.md           # This file
 ├── Agents.txt          # Project goals
 └── tests/              # Playwright integration tests
 ```
 
+---
+
 ## How to Run the Project
 
-### Docker Mode (Recommended - Full Stack)
+### Docker Mode (Recommended - Full Stack with Zetaris)
 
-```bash
-# 1. Ensure .env is configured (already done)
-cd C:\projects\selo
+````bash
+# 1. Download and setup Zetaris per official guide:
+#    - Download zetaris-platform.zip from Zetaris Cloud
+#    - cd zetaris-platform
+#    - docker login zetarishackathon.azurecr.io
+#    - ./preflight.sh
+#    - Edit .env with your settings
+#    - docker compose pull && docker compose up -d
+#    - ./verify.sh
 
-# 2. Login to Zetaris registry
-docker login zetarishackathon.azurecr.io
+# 2. Configure our application .env:
+#    From the project root (C:\projects\selo):
+#    - ZETARIS_URL: http://host.docker.internal:8888
+#    - ZETARIS_API_KEY: <your key from Zetaris GUI>
+#    - METERLESS_API_URL: https://api.meterless.ai/v1
+#    - METERLESS_API_KEY: <your key>
 
-# 3. Build and start ALL services
-docker-compose up --build -d
+# 3. Start our application services:
+docker compose up --build -d
 
-# 4. Verify
-docker-compose ps --all
-docker-compose logs --tail=80 driver api bootstrap
-./verify.sh
-```
+# 3. Access:
+#    - Our Application: http://localhost:3002
+#    - Zetaris UI: http://localhost:3000
+#    - Zetaris API: http://host.docker.internal:8888
 
-### Access Points After Startup:
+# 4. First-time Application Setup:
+#    1. Open http://localhost:3002
+#    2. Add RSS sources (e.g., https://techcrunch.com/feed/)
+#    2. Create AI personalities with Meterless model names
+#    3. Click news items → "Start Discussion"
+#    4. Add your comments, watch AI react
 
-- **Our Application**: http://localhost:3002
-- **Zetaris UI**: http://localhost:3000
-- **Zetaris API**: http://localhost:8888
-- **Our Server API**: http://localhost:3001
-
-### First-time Application Setup:
-
-1. Open http://localhost:3002
-2. Add RSS sources (e.g., `https://techcrunch.com/feed/`)
-3. Create AI personalities with Meterless model names
-4. Click news items → "Start Discussion"
-5. Add your comments, watch AI react
-
-### Development Mode (Without Zetaris)
-
+### Development Mode (Without Full Zetaris)
 ```bash
 # Terminal 1: Server
 cd server && npm start
@@ -360,22 +369,22 @@ cd server && npm start
 # Terminal 2: Client
 cd client && npm start
 # Uses in-memory storage (no Zetaris required)
-```
+````
 
 ### Stopping & Cleanup
 
 ```bash
 # Stop containers, retain data
-docker-compose stop
+docker compose stop
 
 # Restart
-docker-compose start
+docker compose start
 
 # Full cleanup (removes containers/network, KEEPS volumes)
-docker-compose down
+docker compose down
 
 # NUCLEAR: Remove everything including data
-docker-compose down -v
+docker compose down -v
 ```
 
 ---
@@ -387,8 +396,7 @@ docker-compose down -v
 #### 1. Preflight Check Fails
 
 ```bash
-# Run preflight from Zetaris platform directory
-cd C:\zetaris-platform
+# From zetaris-platform directory
 ./preflight.sh
 # Fix all reported issues before proceeding
 ```
@@ -396,8 +404,7 @@ cd C:\zetaris-platform
 #### 2. Driver Won't Start (Spark Metastore Build)
 
 ```bash
-# Check driver logs
-docker-compose logs driver
+docker compose logs driver
 # First startup takes 2-5 minutes on slow/emulated hosts
 # Wait for retries (180 x 10s = 30 min max)
 ```
@@ -405,62 +412,58 @@ docker-compose logs driver
 #### 3. UI Shows 404 or Blank Page
 
 ```bash
+docker compose logs ui
 # Check if API is healthy
-curl http://localhost:8888/
-# Check UI logs
-docker-compose logs ui
+curl http://host.docker.internal:8888/
 ```
 
 #### 4. Our App Can't Connect to Zetaris
 
 ```bash
-# Verify Zetaris API is reachable from our server
-docker-compose exec server curl http://api:8888/
-
-# Check server logs
-docker-compose logs server
+# From inside our server container
+docker compose exec server curl http://host.docker.internal:8888/
+docker compose logs server
 ```
 
 #### 5. Data Not Persisting
 
 ```bash
-# Check volumes exist
 docker volume ls
 # Should show: selo_pgdata, selo_customer-data, selo_driver-data, etc.
 ```
 
-#### 6. Reset Everything (Nuclear Option)
+#### 5. Reset Everything (Nuclear Option)
 
 ```bash
 # WARNING: Deletes ALL data including metastore, encryption keys, users
-docker-compose down -v
+docker compose down -v
 docker system prune -f
-# Then restart from step 1
+# Then restart from Step 1
 ```
 
 ### Logs & Debugging
 
 ```bash
 # All services
-docker-compose logs -f
+docker compose logs -f
 
 # Specific service
-docker-compose logs -f driver
-docker-compose logs -f api
-docker-compose logs -f server
+docker compose logs -f driver
+docker compose logs -f api
+docker compose logs -f server
 
 # Last 100 lines
-docker-compose logs --tail=100 api
+docker compose logs --tail=100 api
 ```
 
 ### Health Checks
 
 ```bash
 # Quick status
-docker-compose ps
+docker compose ps
 
 # Detailed health
-docker inspect --format='{{.State.Health.Status}}' $(docker-compose ps -q driver)
+docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q driver)
 ```
 
 ---
@@ -469,12 +472,12 @@ docker inspect --format='{{.State.Health.Status}}' $(docker-compose ps -q driver
 
 | Task             | Command                                       |
 | ---------------- | --------------------------------------------- |
-| Start all        | `docker-compose up -d`                        |
-| Stop (keep data) | `docker-compose stop`                         |
-| Restart          | `docker-compose start`                        |
-| Rebuild & start  | `docker-compose up --build -d`                |
-| View logs        | `docker-compose logs -f [service]`            |
-| Check status     | `docker-compose ps --all`                     |
-| Verify Zetaris   | `./verify.sh`                                 |
-| Clean restart    | `docker-compose down && docker-compose up -d` |
-| Nuclear reset    | `docker-compose down -v`                      |
+| Start all        | `docker compose up -d`                        |
+| Stop (keep data) | `docker compose stop`                         |
+| Restart          | `docker compose start`                        |
+| Rebuild & start  | `docker compose up --build -d`                |
+| View logs        | `docker compose logs -f [service]`            |
+| Check status     | `docker compose ps --all`                     |
+| Verify Zetaris   | `./verify.sh` (from zetaris-platform dir)     |
+| Clean restart    | `docker compose down && docker compose up -d` |
+| Nuclear reset    | `docker compose down -v`                      |
