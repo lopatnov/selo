@@ -50,10 +50,11 @@ async function main() {
   console.log(`${meterlessStatus.status === 'online' ? 'PASS' : 'FAIL'} GET /v1/models -> ${statusLine}`);
 
   const models = await runtime.listModels();
+  const routingModes = models.routingModes || models.models;
+  const otherModels = models.otherModels || [];
   console.log(
-    `     ${models.models.length} routing mode(s) from ${models.source}: ${models.models
-      .slice(0, 12)
-      .join(', ')}`
+    `     ${routingModes.length} routing mode(s) + ${otherModels.length} other runtime id(s) ` +
+      `from ${models.source}: ${routingModes.slice(0, 12).join(', ')}`
   );
   console.log('');
 

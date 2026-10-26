@@ -599,6 +599,16 @@ body {
   gap: 0.5rem;
 }
 
+.provider-models-secondary {
+  max-height: 260px;
+  overflow: auto;
+}
+
+.provider-models-secondary .model-chip {
+  background: #f4f6f8;
+  color: #5d6d7e;
+}
+
 .model-chip {
   background: #e8f4fd;
   color: #2980b9;

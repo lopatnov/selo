@@ -75,6 +75,22 @@ function extractModelIds(body) {
   return ids;
 }
 
+/**
+ * The runtime catalogue has two kinds of ids: routing modes (`meterless/*`)
+ * and provider model ids (`gpt-4o`, `openrouter/...`, ...). Routing modes are
+ * what this app sends to the local runtime; the rest are kept visible so the
+ * AI Provider page can prove the full runtime answer was received.
+ */
+function splitModelIds(ids) {
+  const routingModes = [];
+  const otherModels = [];
+  for (const id of ids) {
+    if (id.startsWith('meterless/')) routingModes.push(id);
+    else otherModels.push(id);
+  }
+  return { routingModes, otherModels };
+}
+
 function createMeterlessRuntime(options = {}) {
   const env = options.env || process.env;
   const store = options.settings || new SettingsStore(options.settingsFile || defaultSettingsFile());
@@ -120,22 +136,46 @@ function createMeterlessRuntime(options = {}) {
     return { token: null, source: 'none' };
   }
 
-  function resolveBaseUrl() {
-    const stored = store.get(KEY_BASE_URL) || env.METERLESS_BASE_URL || DEFAULT_BASE_URL;
-    try {
-      return normalizeBaseUrl(stored);
-    } catch {
-      return DEFAULT_BASE_URL;
+  /**
+   * Return the base URL together with where it came from, so the UI can show
+   * whether the value is persisted, inherited from the environment or just the
+   * built-in default. A corrupt stored value falls through instead of hiding a
+   * perfectly good environment value.
+   */
+  function resolveBaseUrlInfo() {
+    const stored = store.get(KEY_BASE_URL);
+    if (stored) {
+      try {
+        return { baseUrl: normalizeBaseUrl(stored), source: 'settings' };
+      } catch {
+        // Ignore a corrupt saved value and keep looking.
+      }
     }
+
+    if (env.METERLESS_BASE_URL) {
+      try {
+        return { baseUrl: normalizeBaseUrl(env.METERLESS_BASE_URL), source: 'env' };
+      } catch {
+        // Ignore a malformed environment value.
+      }
+    }
+
+    return { baseUrl: DEFAULT_BASE_URL, source: 'default' };
+  }
+
+  function resolveBaseUrl() {
+    return resolveBaseUrlInfo().baseUrl;
   }
 
   function getConfig() {
     const { token, source, envVar } = resolveToken();
+    const { baseUrl, source: baseUrlSource } = resolveBaseUrlInfo();
     return {
       id: PROVIDER_ID,
       name: PROVIDER_NAME,
       kind: PROVIDER_KIND,
-      baseUrl: resolveBaseUrl(),
+      baseUrl,
+      baseUrlSource,
       defaultBaseUrl: DEFAULT_BASE_URL,
       appId,
       hasToken: Boolean(token),
@@ -170,12 +210,13 @@ function createMeterlessRuntime(options = {}) {
 
   function connect(link) {
     const parsed = parseConnectLink(link);
-    if (!isUsableToken(parsed.token)) {
+    const token = String(parsed.token || '').trim();
+    if (!isUsableToken(token)) {
       throw new ProviderError('invalid_token', 'The connect link does not contain a usable token.');
     }
     store.setMany({
       [KEY_BASE_URL]: parsed.baseUrl,
-      [KEY_TOKEN]: parsed.token
+      [KEY_TOKEN]: token
     });
     return getConfig();
   }
@@ -271,6 +312,22 @@ function createMeterlessRuntime(options = {}) {
 
   async function listModels() {
     const baseUrl = resolveBaseUrl();
+    const startedAt = Date.now();
+    const checkedAt = new Date().toISOString();
+
+    const fallback = (status, httpStatus, reason) => ({
+      status,
+      httpStatus,
+      latencyMs: Date.now() - startedAt,
+      checkedAt,
+      models: DEFAULT_DISPOSITIONS,
+      routingModes: DEFAULT_DISPOSITIONS,
+      otherModels: [],
+      total: DEFAULT_DISPOSITIONS.length,
+      source: 'defaults',
+      ...(reason ? { reason } : {})
+    });
+
     try {
       const { response, body } = await fetchJson(
         `${baseUrl}/models`,
@@ -279,49 +336,52 @@ function createMeterlessRuntime(options = {}) {
       );
 
       if (response.status === 401 || response.status === 403) {
-        return {
-          status: 'unauthorized',
-          httpStatus: response.status,
-          models: DEFAULT_DISPOSITIONS,
-          source: 'defaults'
-        };
+        return fallback('unauthorized', response.status, 'The runtime rejected the token.');
       }
 
       if (response.status !== 200) {
-        return {
-          status: 'offline',
-          httpStatus: response.status,
-          models: DEFAULT_DISPOSITIONS,
-          source: 'defaults'
-        };
+        return fallback('offline', response.status, `Unexpected HTTP ${response.status} from /v1/models.`);
       }
 
-      // Keep every meterless/* id, including routing modes this app has never
-      // heard of. The runtime owns the model catalogue.
-      const models = extractModelIds(body).filter(id => id.startsWith('meterless/'));
-      if (models.length === 0) {
+      // Keep every id the runtime reports. The runtime owns the model
+      // catalogue, and the UI shows which ids are routing modes versus
+      // provider models.
+      const ids = extractModelIds(body);
+      if (ids.length === 0) {
+        return fallback('offline', 200, 'The runtime answered but returned no model ids.');
+      }
+
+      const { routingModes, otherModels } = splitModelIds(ids);
+      const models = [...routingModes, ...otherModels];
+
+      if (routingModes.length === 0) {
         return {
           status: 'offline',
           httpStatus: 200,
-          models: DEFAULT_DISPOSITIONS,
-          source: 'defaults'
+          latencyMs: Date.now() - startedAt,
+          checkedAt,
+          reason: 'The runtime answered but returned no meterless/* routing modes.',
+          models,
+          routingModes,
+          otherModels,
+          total: models.length,
+          source: 'runtime'
         };
       }
 
       return {
         status: 'online',
         httpStatus: 200,
+        latencyMs: Date.now() - startedAt,
+        checkedAt,
         models,
+        routingModes,
+        otherModels,
+        total: models.length,
         source: 'runtime'
       };
     } catch (error) {
-      return {
-        status: 'offline',
-        httpStatus: null,
-        models: DEFAULT_DISPOSITIONS,
-        source: 'defaults',
-        reason: describeFailure(error)
-      };
+      return fallback('offline', null, describeFailure(error));
     }
   }
 
@@ -483,5 +543,6 @@ module.exports = {
   createMeterlessRuntime,
   extractModelIds,
   isUsableToken,
-  normalizeAppId
+  normalizeAppId,
+  splitModelIds
 };

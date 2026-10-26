@@ -73,6 +73,10 @@ function createProvidersRouter({ runtime, providers = [] }) {
       const status = await runtime.getStatus();
       res.json({
         ...result,
+        // `result.status` is the detection result (online/unauthorized/offline).
+        // Keep it under its own key because `status` below is the full probe
+        // object used by the rest of the page.
+        detectionStatus: result.status,
         config: runtime.getConfig(),
         status
       });

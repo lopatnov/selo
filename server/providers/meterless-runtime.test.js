@@ -16,6 +16,7 @@ const {
 const { SettingsStore } = require('./settings-store');
 const {
   CHAT_TIMEOUT_MS,
+  DEFAULT_DISPOSITIONS,
   KEY_BASE_URL,
   KEY_TOKEN,
   ProviderError,
@@ -249,17 +250,57 @@ test('chat maps 401 and 403 to unauthorized', async () => {
   }
 });
 
-test('listModels keeps unknown meterless ids and drops unrelated models', async () => {
+test('listModels returns the full runtime catalogue with routing modes first', async () => {
   const { runtime } = makeRuntime({
     fetchImpl: async () =>
       jsonResponse(200, {
-        data: [{ id: 'meterless/auto' }, { id: 'gpt-4' }, { id: 'meterless/quantum' }]
+        data: [
+          { id: 'gpt-4' },
+          { id: 'meterless/auto' },
+          { id: 'meterless/quantum' },
+          { id: 'gpt-4' }
+        ]
       })
   });
 
   const result = await runtime.listModels();
   assert.equal(result.status, 'online');
-  assert.deepEqual(result.models, ['meterless/auto', 'meterless/quantum']);
+  assert.equal(result.source, 'runtime');
+  assert.equal(result.httpStatus, 200);
+  assert.equal(typeof result.checkedAt, 'string');
+  assert.deepEqual(result.models, ['meterless/auto', 'meterless/quantum', 'gpt-4']);
+  assert.deepEqual(result.routingModes, ['meterless/auto', 'meterless/quantum']);
+  assert.deepEqual(result.otherModels, ['gpt-4']);
+  assert.equal(result.total, 3);
+});
+
+test('listModels reports a runtime with provider models but no routing modes as offline', async () => {
+  const { runtime } = makeRuntime({
+    fetchImpl: async () => jsonResponse(200, { data: [{ id: 'gpt-4o' }] })
+  });
+
+  const result = await runtime.listModels();
+  assert.equal(result.status, 'offline');
+  assert.equal(result.source, 'runtime');
+  assert.deepEqual(result.models, ['gpt-4o']);
+  assert.deepEqual(result.routingModes, []);
+  assert.deepEqual(result.otherModels, ['gpt-4o']);
+  assert.match(result.reason, /meterless/);
+});
+
+test('listModels falls back to the built-in modes when the runtime rejects the token', async () => {
+  const { runtime } = makeRuntime({
+    token: 'wrong-token',
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+
+  const result = await runtime.listModels();
+  assert.equal(result.status, 'unauthorized');
+  assert.equal(result.source, 'defaults');
+  assert.deepEqual(result.models, DEFAULT_DISPOSITIONS);
+  assert.deepEqual(result.routingModes, DEFAULT_DISPOSITIONS);
+  assert.deepEqual(result.otherModels, []);
+  assert.match(result.reason, /token/i);
 });
 
 test('the token starts from the environment when nothing is saved', () => {
@@ -347,10 +388,66 @@ test('saveConfig normalises the base URL; connect stores origin + key', () => {
   runtime.saveConfig({ baseUrl: 'localhost:8787/v1/models' });
   assert.equal(store.get(KEY_BASE_URL), 'http://localhost:8787/v1');
   assert.equal(runtime.getConfig().baseUrl, 'http://localhost:8787/v1');
+  assert.equal(runtime.getConfig().baseUrlSource, 'settings');
 
   runtime.connect('http://10.0.0.5:8787/connect#k=link-key');
   assert.equal(store.get(KEY_BASE_URL), 'http://10.0.0.5:8787/v1');
   assert.equal(store.get(KEY_TOKEN), 'link-key');
   assert.equal(runtime.getConfig().baseUrl, 'http://10.0.0.5:8787/v1');
+  assert.equal(runtime.getConfig().baseUrlSource, 'settings');
   assert.equal(runtime.getConfig().hasToken, true);
+});
+
+test('getConfig reports whether the base URL came from settings, env or the default', () => {
+  const fromDefault = makeRuntime({
+    token: null,
+    env: {},
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.equal(fromDefault.runtime.getConfig().baseUrl, DEFAULT_BASE_URL);
+  assert.equal(fromDefault.runtime.getConfig().baseUrlSource, 'default');
+
+  const fromEnv = makeRuntime({
+    token: null,
+    env: { METERLESS_BASE_URL: 'localhost:8787/v1/models' },
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.equal(fromEnv.runtime.getConfig().baseUrl, 'http://localhost:8787/v1');
+  assert.equal(fromEnv.runtime.getConfig().baseUrlSource, 'env');
+
+  const fromSettings = makeRuntime({
+    token: null,
+    baseUrl: 'http://10.0.0.5:8088/v1/models',
+    env: { METERLESS_BASE_URL: 'http://env.example:9999/v1' },
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.equal(fromSettings.runtime.getConfig().baseUrl, 'http://10.0.0.5:8088/v1');
+  assert.equal(fromSettings.runtime.getConfig().baseUrlSource, 'settings');
+});
+
+test('connect persists the base URL and token so a fresh process still sees them', () => {
+  const dir = tempDir();
+  const store = new SettingsStore(path.join(dir, 'settings.json'));
+  const runtime = createMeterlessRuntime({
+    settings: store,
+    stateDir: dir,
+    env: {},
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+
+  runtime.connect('http://10.0.0.5:8787/connect#k=persisted-key');
+
+  const raw = JSON.parse(fs.readFileSync(path.join(dir, 'settings.json'), 'utf8'));
+  assert.equal(raw.meterless_runtime_token, 'persisted-key');
+  assert.equal(raw.meterless_base_url, 'http://10.0.0.5:8787/v1');
+
+  const reloaded = createMeterlessRuntime({
+    settings: new SettingsStore(path.join(dir, 'settings.json')),
+    stateDir: dir,
+    env: {},
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.deepEqual(reloaded.resolveToken(), { token: 'persisted-key', source: 'settings' });
+  assert.equal(reloaded.getConfig().baseUrl, 'http://10.0.0.5:8787/v1');
+  assert.equal(reloaded.getConfig().baseUrlSource, 'settings');
 });

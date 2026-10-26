@@ -426,15 +426,76 @@ The settings page supports:
 - **Auto Detect** over ports 8088, 8090, 8787 and 11434 on `127.0.0.1`,
   `localhost` and `[::1]`; the first online or unauthorized hit is saved.
 - Pasting a connect link `http://<host>:<port>/connect#k=<key>`. The base URL
-  comes from the link origin and the key from `k`; the link is never logged.
-- Reading models from `GET /v1/models`. Ids are routing modes:
-  `meterless/auto`, `meterless/fast`, `meterless/deep`, `meterless/cheap`,
-  `meterless/local`, `meterless/fusion`, plus `meterless/<class>` and
-  `meterless/<class>.<disposition>`. Unknown `meterless/*` ids are kept.
+  comes from the link origin and the key from `k`. Both are written to the
+  server's provider settings file (`server/data/settings.json`, or
+  `SELO_SETTINGS_FILE`); the link is never logged and the token is never
+  returned by the API.
+- Reading models from `GET /v1/models`. The page shows **every** id the runtime
+  returns and separates them into routing modes (`meterless/auto`,
+  `meterless/fast`, `meterless/deep`, `meterless/cheap`, `meterless/local`,
+  `meterless/fusion`, plus `meterless/<class>` and
+  `meterless/<class>.<disposition>`) and the runtime's other provider ids.
+  Only routing modes are sent to the local runtime by AI personalities; other
+  ids keep using the hosted endpoint. When the runtime does not answer, the
+  page labels the built-in six-mode list as a fallback instead of pretending
+  it came from the runtime.
 
 `meterless/<routing-mode>` model names on AI personalities use the local
 runtime. Any other model id keeps using the hosted endpoint configured by
 `METERLESS_API_URL` and `METERLESS_API_KEY`.
+
+### When is the `.env` token used?
+
+`resolveToken()` resolves exactly one token for each request. The first usable
+value wins:
+
+1. `meterless_runtime_token` saved from the AI Provider page (Save or a connect
+   link),
+2. `METERLESS_RUNTIME_TOKEN`,
+3. `METERLESS_API_KEY`,
+4. `<stateDir>/proxy-token` written by the runtime.
+
+Consequences:
+
+- On a fresh install with nothing saved in the UI and no `proxy-token`, the
+  environment token is used for every runtime call: status probes
+  (`GET /v1/models`), Auto Detect probes, `/healthz` diagnostics and chat
+  requests. The live page shows this as **Token source: environment**.
+- Once a token is saved from the UI or a connect link, that token wins over the
+  environment. The environment remains a fallback only while no saved token
+  exists.
+- `METERLESS_API_KEY` is also the key for the hosted endpoint used by
+  non-`meterless/*` model ids. If the local runtime token differs, set
+  `METERLESS_RUNTIME_TOKEN` so the hosted key is not sent to the local runtime.
+
+### AI Provider page reference
+
+| Control                              | What it does                                                                                                                                                                                                                                                                     | Writes settings?      |
+| ------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------- |
+| **Status badges**                    | Show the Meterless Runtime and Zetaris states. Meterless state is decided by `GET /v1/models`: `online`, `unauthorized` (401/403), `offline`, or `not configured`.                                                                                                               | No                    |
+| **Base URL**                         | Accepts `host:port`, `/v1`, `/v1/models`, `/v1/chat/completions` or `/healthz` and normalises it to `<origin>/v1`. It never creates `/v1/v1`.                                                                                                                                    | Only on **Save**      |
+| **Runtime token**                    | Password field for the token from `<stateDir>/proxy-token` or the runtime UI. The placeholder `rt-local` is rejected. An empty field keeps the stored token.                                                                                                                     | Only on **Save**      |
+| **Save**                             | Saves the base URL and/or a new token, then re-checks `GET /v1/models`. The token field is cleared and the token is never rendered back.                                                                                                                                         | Yes                   |
+| **Auto Detect**                      | Probes the 12 combinations of ports `8088`, `8090`, `8787`, `11434` and hosts `127.0.0.1`, `localhost`, `[::1]`. The first `online` or `unauthorized` runtime has its base URL saved.                                                                                            | Yes, base URL         |
+| **Re-check status**                  | Re-reads the saved configuration and calls `GET /v1/models` again. It does not change the base URL or token.                                                                                                                                                                     | No                    |
+| **Connect link**                     | Parses `http://<host>:<port>/connect#k=<key>`: the link origin becomes the base URL and `k` becomes the token. Both are saved server-side; the input is cleared.                                                                                                                 | Yes, base URL + token |
+| **Models / routing modes → Refresh** | Calls `GET /v1/models` and shows every id returned, split into routing modes (`meterless/*`) and other runtime ids, with the answer source, runtime status `HTTP`, total count and check time. If the runtime is unavailable it labels the built-in six-mode list as a fallback. | No                    |
+| **Send test request**                | Sends one plain-text chat request to the selected model and requires a string response. A cold model load may take up to 180 s.                                                                                                                                                  | No                    |
+| **Zetaris → Re-check status**        | Runs the Zetaris `SELECT 1` probe. The Zetaris key and organisation id are read from `.env`, not from this page.                                                                                                                                                                 | No                    |
+| **Zetaris → Run query**              | Runs one read-only `SELECT`, `SHOW`, `DESCRIBE` or `WITH` statement through the Zetaris REST SQL API.                                                                                                                                                                            | No                    |
+
+### What is stored where
+
+| Data                                       | Location                                                    | Survives a restart?                             |
+| ------------------------------------------ | ----------------------------------------------------------- | ----------------------------------------------- |
+| Meterless base URL and saved runtime token | `server/data/settings.json` (or `SELO_SETTINGS_FILE`)       | Yes; atomic write, chmod `0600` where supported |
+| Meterless models and status                | Page state only; fetched again on every load                | No                                              |
+| Zetaris credentials                        | `.env` (`ZETARIS_API_KEY`, `ZETARIS_ORG_ID`, `ZETARIS_URL`) | Yes                                             |
+| RSS sources, users, news, comments         | `server/data/state.json` (or `SELO_STATE_FILE`)             | Yes                                             |
+
+In Docker, `server/data` is the named volume `server-data` mounted at
+`/app/server/data`, so a save from the AI Provider page survives container
+recreation.
 
 Optional environment variables:
 
@@ -769,16 +830,17 @@ not reachable from inside a container.
 
 ### Suite overview
 
-| Suite                                 | Command                     | External services                                                                                |
-| ------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------ |
-| Unit and contract tests (`node:test`) | `npm test`                  | none — mocks and loopback only                                                                   |
-| Provider contract only                | `npm run test:provider`     | none                                                                                             |
-| Zetaris contract only                 | `npm run test:zetaris`      | none                                                                                             |
-| State store only                      | `npm run test:state`        | none                                                                                             |
-| Smoke test                            | `npm run smoke`             | `.env` with a runtime and Zetaris both online; boots the API on port 3155 with a temp state file |
-| Provider live checks                  | `npm run verify:provider`   | mock runtime on port 18090; probes a real runtime on 8088 if one is listening                    |
-| Connection checks                     | `npm run check:connections` | real Meterless Runtime and Zetaris from `.env`                                                   |
-| End-to-end (Playwright)               | `npm --prefix tests test`   | a running app at <http://localhost:3002>                                                         |
+| Suite                                 | Command                                 | External services                                                                                |
+| ------------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Unit and contract tests (`node:test`) | `npm test`                              | none — mocks and loopback only                                                                   |
+| Provider contract only                | `npm run test:provider`                 | none                                                                                             |
+| Zetaris contract only                 | `npm run test:zetaris`                  | none                                                                                             |
+| State store only                      | `npm run test:state`                    | none                                                                                             |
+| Smoke test                            | `npm run smoke`                         | `.env` with a runtime and Zetaris both online; boots the API on port 3155 with a temp state file |
+| Provider live checks                  | `npm run verify:provider`               | mock runtime on port 18090; probes a real runtime on 8088 if one is listening                    |
+| Connection checks                     | `npm run check:connections`             | real Meterless Runtime and Zetaris from `.env`                                                   |
+| Provider page E2E (Playwright)        | `npm --prefix tests run test:providers` | none — the client is started automatically and every API response is mocked                      |
+| End-to-end (Playwright, full stack)   | `npm --prefix tests test`               | a running app at <http://localhost:3002>                                                         |
 
 ### Unit and contract tests
 
@@ -838,7 +900,30 @@ npm --prefix tests install
 npm --prefix tests run install-browsers
 ```
 
-Run against a stack already listening at <http://localhost:3002>:
+Focused, hermetic suite for the AI Provider page:
+
+```bash
+npm --prefix tests run test:providers
+npm --prefix tests run test:providers:headed
+```
+
+[`tests/providers.spec.js`](tests/providers.spec.js) starts the React client
+with [`tests/playwright.providers.config.js`](tests/playwright.providers.config.js)
+and mocks `GET /api/providers/meterless`, `GET /api/providers/meterless/models`,
+`POST /api/providers/meterless/detect`, `POST /api/providers/meterless/connect`,
+`PUT /api/providers/meterless/config`, `POST /api/providers/meterless/chat` and
+`GET /api/zetaris` inside the browser. It never talks to a real runtime, never
+creates `server/data/settings.json`, and covers:
+
+- the Connect link explanation and the fact that the secret is sent once, not
+  echoed in the page or kept in the input;
+- Auto Detect saving the discovered base URL and reporting the detection status;
+- Re-check status re-reading `GET /v1/models` and reflecting a changed status;
+- the full runtime catalogue plus the honest built-in fallback label;
+- Save storing the base URL/token through the API and clearing the token field.
+
+Run the older full-stack suite against a stack already listening at
+<http://localhost:3002>:
 
 ```bash
 npm --prefix tests test
@@ -964,6 +1049,7 @@ docker inspect --format='{{.State.Health.Status}}' $(docker compose ps -q driver
 | Smoke test               | `npm run smoke`                                 |
 | Live provider check      | `npm run verify:provider`                       |
 | Live connection check    | `npm run check:connections`                     |
+| Provider page E2E        | `npm --prefix tests run test:providers`         |
 | End-to-end tests         | `npm --prefix tests test`                       |
 | Start all containers     | `docker compose up -d`                          |
 | Stop (keep data)         | `docker compose stop`                           |

@@ -22,14 +22,23 @@ const TOKEN_SOURCE_LABELS = {
   none: 'missing'
 };
 
+const BASE_URL_SOURCE_LABELS = {
+  env: 'environment',
+  settings: 'saved in this app',
+  default: 'built-in default'
+};
+
 function readError(error) {
   return error.response?.data?.error || error.message || 'Request failed';
 }
 
-function StatusBadge({ status }) {
+function StatusBadge({ status, testId }) {
   const kind = STATUS_LABELS[status] ? status : 'offline';
   return (
-    <span className={`provider-status status-${kind === 'unconfigured' ? 'offline' : kind}`}>
+    <span
+      className={`provider-status status-${kind === 'unconfigured' ? 'offline' : kind}`}
+      data-testid={testId}
+    >
       <span className="provider-dot" />
       {STATUS_LABELS[kind] || kind}
     </span>
@@ -40,7 +49,16 @@ function ProviderSettings() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState({ status: 'checking' });
   const [models, setModels] = useState(DEFAULT_MODELS);
-  const [modelsSource, setModelsSource] = useState('defaults');
+  const [routingModes, setRoutingModes] = useState(DEFAULT_MODELS);
+  const [otherModels, setOtherModels] = useState([]);
+  const [modelsMeta, setModelsMeta] = useState({
+    source: 'defaults',
+    status: 'checking',
+    httpStatus: null,
+    total: DEFAULT_MODELS.length,
+    checkedAt: null,
+    reason: ''
+  });
   const [loading, setLoading] = useState(true);
 
   const [baseUrl, setBaseUrl] = useState('http://127.0.0.1:8088/v1');
@@ -70,13 +88,39 @@ function ProviderSettings() {
   const fetchModels = useCallback(async () => {
     try {
       const { data } = await axios.get(`${API_BASE}/providers/meterless/models`);
-      const list = Array.isArray(data.models) && data.models.length > 0 ? data.models : DEFAULT_MODELS;
+      const runtimeModels = Array.isArray(data.models) ? data.models : [];
+      const list = runtimeModels.length > 0 ? runtimeModels : DEFAULT_MODELS;
+      const routing = Array.isArray(data.routingModes)
+        ? data.routingModes
+        : list.filter(model => model.startsWith('meterless/'));
+      const others = Array.isArray(data.otherModels)
+        ? data.otherModels
+        : list.filter(model => !model.startsWith('meterless/'));
+
       setModels(list);
-      setModelsSource(data.source || 'runtime');
+      setRoutingModes(routing);
+      setOtherModels(others);
+      setModelsMeta({
+        source: data.source || 'runtime',
+        status: data.status || 'unknown',
+        httpStatus: data.httpStatus ?? null,
+        total: Number.isInteger(data.total) ? data.total : list.length,
+        checkedAt: data.checkedAt || null,
+        reason: data.reason || ''
+      });
       setTestModel(current => (list.includes(current) ? current : list[0]));
-    } catch {
+    } catch (err) {
       setModels(DEFAULT_MODELS);
-      setModelsSource('defaults');
+      setRoutingModes(DEFAULT_MODELS);
+      setOtherModels([]);
+      setModelsMeta({
+        source: 'defaults',
+        status: 'offline',
+        httpStatus: null,
+        total: DEFAULT_MODELS.length,
+        checkedAt: null,
+        reason: readError(err)
+      });
     }
   }, []);
 
@@ -123,7 +167,11 @@ function ProviderSettings() {
       const { data } = await axios.put(`${API_BASE}/providers/meterless/config`, payload);
       applyConfig(data);
       setToken('');
-      setNotice('Saved. Status re-checked with GET /v1/models.');
+      setNotice(
+        `Saved on the server. Status re-checked with GET /v1/models: ${
+          data.status?.status || 'unknown'
+        }.`
+      );
       await fetchModels();
     } catch (err) {
       setError(readError(err));
@@ -139,11 +187,18 @@ function ProviderSettings() {
     try {
       const { data } = await axios.post(`${API_BASE}/providers/meterless/detect`);
       if (data.found) {
-        setNotice(`Found a runtime at ${data.baseUrl} (${data.status}).`);
-        setBaseUrl(data.baseUrl);
+        const detectedStatus =
+          data.detectionStatus ||
+          (typeof data.status === 'string' ? data.status : data.status?.status) ||
+          'unknown';
+        setNotice(`Found a runtime at ${data.baseUrl} (${detectedStatus}). The base URL was saved.`);
+        setBaseUrl(data.config?.baseUrl || data.baseUrl);
         await load();
       } else {
-        setError('No runtime answered on the usual ports. Start Meterless Runtime and try again.');
+        setError(
+          `No runtime answered on the usual ports (tried ${data.tried ?? 0} candidates). ` +
+            'Start Meterless Runtime and try again, or paste its Connect link.'
+        );
       }
     } catch (err) {
       setError(readError(err));
@@ -159,10 +214,16 @@ function ProviderSettings() {
     setError('');
     setNotice('');
     try {
-      await axios.post(`${API_BASE}/providers/meterless/connect`, { link: connectLink.trim() });
+      const { data } = await axios.post(`${API_BASE}/providers/meterless/connect`, {
+        link: connectLink.trim()
+      });
       // The link contains a secret in its fragment; drop it from the field.
       setConnectLink('');
-      setNotice('Connect link applied. The key was stored locally and is not shown again.');
+      setNotice(
+        `Connect link applied. Base URL and key were saved on the server; status: ${
+          data.status?.status || 'unknown'
+        }. The key is never returned by the API or shown again.`
+      );
       await load();
     } catch (err) {
       setError(readError(err));
@@ -221,15 +282,23 @@ function ProviderSettings() {
       <div className="card-header" style={{ paddingBottom: 0 }}>
         <h2 className="card-title">🔌 AI Providers</h2>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <StatusBadge status={statusKind} />
-          <StatusBadge status={zetarisStatus} />
+          <StatusBadge status={statusKind} testId="meterless-status" />
+          <StatusBadge status={zetarisStatus} testId="zetaris-status" />
         </div>
       </div>
 
       {loading && <div className="card">Checking Meterless Runtime…</div>}
 
-      {error && <div className="provider-alert error">{error}</div>}
-      {notice && <div className="provider-alert success">{notice}</div>}
+      {error && (
+        <div className="provider-alert error" data-testid="provider-error">
+          {error}
+        </div>
+      )}
+      {notice && (
+        <div className="provider-alert success" data-testid="provider-notice">
+          {notice}
+        </div>
+      )}
 
       {unauthorized && (
         <div className="provider-alert warning">
@@ -283,7 +352,9 @@ function ProviderSettings() {
             />
             <small className="provider-hint">
               Precedence: a token saved here, then the environment, then the runtime{' '}
-              <code>proxy-token</code> file. It is never returned by the API.
+              <code>proxy-token</code> file. It is never returned by the API. A saved token is
+              written to the server's provider settings file next to <code>state.json</code>{' '}
+              (or <code>SELO_SETTINGS_FILE</code>), not to browser storage.
               {config?.tokenSource === 'env' && (
                 <>
                   {' '}Currently taken from <code>{config.tokenEnvVar || 'METERLESS_API_KEY'}</code> in{' '}
@@ -303,27 +374,48 @@ function ProviderSettings() {
               className="btn btn-secondary"
               onClick={handleDetect}
               disabled={busy === 'detect'}
+              title="Probe 8088, 8090, 8787 and 11434 on 127.0.0.1, localhost and [::1]; save the first runtime that answers."
             >
               {busy === 'detect' ? 'Detecting…' : 'Auto Detect'}
             </button>
-            <button type="button" className="btn btn-secondary" onClick={load} disabled={loading}>
-              Re-check status
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={load}
+              disabled={loading}
+              title="Re-read the saved config and call GET /v1/models again. Settings are not changed."
+            >
+              {loading ? 'Checking…' : 'Re-check status'}
             </button>
           </div>
+          <small className="provider-hint">
+            <strong>Auto Detect</strong> probes the usual runtime ports and saves the first
+            online or unauthorized answer. <strong>Re-check status</strong> only re-reads the
+            saved configuration and calls <code>GET /v1/models</code>; it never changes
+            settings.
+          </small>
         </form>
 
         <dl className="provider-facts">
           <div>
             <dt>Status</dt>
             <dd>
-              <StatusBadge status={statusKind} />
+              <StatusBadge status={statusKind} testId="meterless-status-fact" />
               {status?.httpStatus ? ` · HTTP ${status.httpStatus}` : ''}
               {status?.reason ? ` · ${status.reason}` : ''}
             </dd>
           </div>
           <div>
+            <dt>Base URL source</dt>
+            <dd data-testid="base-url-source">
+              {BASE_URL_SOURCE_LABELS[config?.baseUrlSource] ||
+                config?.baseUrlSource ||
+                (config ? 'not reported by this server' : 'checking')}
+            </dd>
+          </div>
+          <div>
             <dt>Token source</dt>
-            <dd>{TOKEN_SOURCE_LABELS[tokenSource] || tokenSource}</dd>
+            <dd data-testid="token-source">{TOKEN_SOURCE_LABELS[tokenSource] || tokenSource}</dd>
           </div>
           <div>
             <dt>App id</dt>
@@ -339,8 +431,18 @@ function ProviderSettings() {
       <div className="card">
         <h3 className="provider-section-title">Connect link</h3>
         <p className="provider-note">
-          Paste <code>{'http://<host>:<port>/connect#k=<key>'}</code>. The base URL
-          comes from the link origin and the key is stored locally. The link is never logged.
+          A connect link is the one-time link Meterless Runtime shows under{' '}
+          <strong>Settings → Connect</strong>. It looks like{' '}
+          <code>{'http://<host>:<port>/connect#k=<key>'}</code>. The link origin becomes the
+          Base URL and the <code>k</code> value becomes the runtime token. Both are saved in the
+          server's provider settings file; the token is never returned by the API, never
+          shown again, and the link is never logged. Nothing is stored in the browser.
+        </p>
+        <p className="provider-note">
+          If this app runs in Docker, do not use <code>127.0.0.1</code> in the link — that is the
+          container itself. Use an address the container can reach, such as{' '}
+          <code>host.docker.internal</code> or the runtime host's LAN address. The link
+          carries the key, so use HTTPS whenever the app is not on localhost.
         </p>
         <form onSubmit={handleConnect} className="provider-inline-form">
           <input
@@ -349,6 +451,7 @@ function ProviderSettings() {
             onChange={event => setConnectLink(event.target.value)}
             placeholder="http://192.168.1.20:8088/connect#k=…"
             aria-label="Connect link"
+            autoComplete="off"
             spellCheck="false"
           />
           <button type="submit" className="btn btn-primary" disabled={busy === 'connect'}>
@@ -365,14 +468,70 @@ function ProviderSettings() {
           </button>
         </div>
         <p className="provider-note">
-          Model ids are routing modes, not model names. Unknown <code>meterless/*</code> ids from
-          the runtime are kept.
-          {modelsSource === 'defaults' && ' Showing the standard modes because the runtime list is unavailable.'}
+          The server asked the runtime for <code>GET /v1/models</code> and keeps every id it
+          returned. Routing modes (<code>meterless/*</code>) are served by the local runtime; any
+          other id is still a runtime id, but this app's AI personalities send
+          non-<code>meterless/*</code> ids to the hosted endpoint.
         </p>
-        <div className="provider-models">
-          {models.map(model => (
-            <span key={model} className="model-chip">{model}</span>
-          ))}
+
+        <dl className="provider-facts">
+          <div>
+            <dt>Answer source</dt>
+            <dd data-testid="models-source">
+              {modelsMeta.source === 'runtime' ? 'runtime GET /v1/models' : 'built-in fallback'}
+            </dd>
+          </div>
+          <div>
+            <dt>Runtime status</dt>
+            <dd data-testid="models-status">
+              {modelsMeta.status}
+              {modelsMeta.httpStatus ? ` · HTTP ${modelsMeta.httpStatus}` : ''}
+            </dd>
+          </div>
+          <div>
+            <dt>Ids returned</dt>
+            <dd data-testid="models-count">{modelsMeta.total}</dd>
+          </div>
+          <div>
+            <dt>Checked</dt>
+            <dd>
+              {modelsMeta.checkedAt ? new Date(modelsMeta.checkedAt).toLocaleString() : 'not yet'}
+            </dd>
+          </div>
+        </dl>
+
+        {modelsMeta.source === 'defaults' && (
+          <div className="provider-alert warning" data-testid="models-fallback">
+            The runtime catalogue is unavailable
+            {modelsMeta.reason ? `: ${modelsMeta.reason}` : ''}. These are the built-in routing
+            modes, not an answer from the runtime.
+          </div>
+        )}
+
+        <div data-testid="models-list">
+          {routingModes.length > 0 && (
+            <>
+              <div className="provider-output-label">Routing modes ({routingModes.length})</div>
+              <div className="provider-models">
+                {routingModes.map(model => (
+                  <span key={model} className="model-chip">{model}</span>
+                ))}
+              </div>
+            </>
+          )}
+
+          {otherModels.length > 0 && (
+            <>
+              <div className="provider-output-label">
+                Other ids reported by the runtime ({otherModels.length})
+              </div>
+              <div className="provider-models provider-models-secondary">
+                {otherModels.map(model => (
+                  <span key={model} className="model-chip">{model}</span>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
 

@@ -6,6 +6,8 @@
   "private": true,
   "scripts": {
     "test": "playwright test",
+    "test:providers": "playwright test --config playwright.providers.config.js",
+    "test:providers:headed": "playwright test --config playwright.providers.config.js --headed",
     "test:ui": "playwright test --ui",
     "test:headed": "playwright test --headed",
     "install-browsers": "playwright install"
