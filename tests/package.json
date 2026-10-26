@@ -1,0 +1,16 @@
+{
+  "name": "ai-news-discussion-tests",
+  "version": "1.0.0",
+  "description": "Integration tests for AI News Discussion Platform",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:headed": "playwright test --headed",
+    "install-browsers": "playwright install"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.40.0",
+    "playwright": "^1.40.0"
+  }
+}

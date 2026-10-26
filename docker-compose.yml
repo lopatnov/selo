@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  zetaris:
+    image: zetaris-platform:latest
+    build: 
+      context: C:/zetaris-platform
+    ports:
+      - "8080:8080"
+    environment:
+      - ZETARIS_API_KEY=${ZETARIS_API_KEY}
+
+  server:
+    build: ./server
+    ports:
+      - "3001:3001"
+    environment:
+      - ZETARIS_URL=${ZETARIS_URL}
+      - ZETARIS_API_KEY=${ZETARIS_API_KEY}
+      - METERLESS_API_URL=${METERLESS_API_URL}
+      - METERLESS_API_KEY=${METERLESS_API_KEY}
+    depends_on:
+      - zetaris
+
+  client:
+    build: ./client
+    ports:
+      - "3002:3000"
+    depends_on:
+      - server
+    environment:
+      - REACT_APP_API_URL=http://server:3001/api

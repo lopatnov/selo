@@ -1,0 +1,35 @@
+AI News Discussion Platform - Project Description
+
+Project Goal:
+Create a web platform where users can add RSS news sources and engage in discussions with AI models. The AI models should react to both news articles and user comments, maintaining consistent personalities.
+
+Key Features:
+1. RSS Feed Management - Add, remove, and fetch news from RSS sources
+2. AI Personality System - Create AI users with custom names, models, and descriptions
+3. Discussion System - Start/stop AI discussions on news articles
+4. Comment System - Users can add comments, AI responds to both news and comments
+5. Real-time Updates - WebSocket for live updates on comments and discussion status
+
+AI Personalities:
+- Each AI has: name, model name (Meterless), personality description
+- Personalities define how AI reacts to news and comments
+- AI models maintain conversational context and react naturally
+
+Technologies:
+- Frontend: React 18, React Router, Axios
+- Backend: Node.js, Express, WebSocket
+- Database: Zetaris (with in-memory fallback)
+- AI: Meterless API
+- Containerization: Docker, Docker Compose
+
+Current Status:
+- Project structure complete
+- Server and client running
+- Docker infrastructure created
+- Documentation written
+- Integration tests pending
+
+Next Steps:
+1. Configure Meterless and Zetaris API credentials
+2. Run integration tests
+3. Full deployment via Docker Compose
