@@ -77,6 +77,9 @@ web_modules/
 # Production data directory (uploads on host, created by docker-compose.prod.yml)
 /data/
 
+# Server provider settings — contains the Meterless Runtime token
+/server/data/
+
 # parcel-bundler cache (https://parceljs.org/)
 .cache
 .parcel-cache

@@ -16,7 +16,7 @@ RUN apk add --no-cache tini curl
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 COPY server ./server
-RUN chown -R node:node /app
+RUN mkdir -p /app/server/data && chown -R node:node /app
 USER node
 EXPOSE 3001
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

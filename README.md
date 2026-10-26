@@ -271,6 +271,60 @@ METERLESS_API_URL=https://api.meterless.ai/v1
 METERLESS_API_KEY=<PII_10>
 ```
 
+### Meterless Runtime provider
+
+The app ships an OpenAI-compatible provider for a local Meterless Runtime 1.4
+(provider contract v4). Open **AI Provider** in the client to configure it.
+
+| Setting            | Value                                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------------------- |
+| Provider id / name | `meterless` / Meterless Runtime                                                                         |
+| Default base URL   | `http://127.0.0.1:8088/v1`                                                                              |
+| Token              | `meterless_runtime_token`, or `<stateDir>/proxy-token`                                                  |
+| Headers            | `Authorization: Bearer <token>`, `meterless-app: <app id>`, `meterless-scope: user` on chat             |
+| Chat timeout       | 180 s per request (a cold model load can take minutes)                                                  |
+| Status source      | `GET /v1/models` — 401/403 `unauthorized`, 200 with `meterless/*` ids `online`, anything else `offline` |
+
+The settings page supports:
+
+- Pasting any base URL — `host:port`, `/v1`, `/v1/models`, `/v1/chat/completions`
+  or `/healthz` — normalised to `<host>/v1`. It never produces `/v1/v1`.
+- Pasting the runtime token, or letting the server read `<stateDir>/proxy-token`.
+  The placeholder `rt-local` is rejected, and a wrong token reports
+  **Unauthorized** (not Offline).
+- **Auto Detect** over ports 8088, 8090, 8787 and 11434 on `127.0.0.1`,
+  `localhost` and `[::1]`; the first online or unauthorized hit is saved.
+- Pasting a connect link `http://<host>:<port>/connect#k=<key>`. The base URL
+  comes from the link origin and the key from `k`; the link is never logged.
+- Reading models from `GET /v1/models`. Ids are routing modes:
+  `meterless/auto`, `meterless/fast`, `meterless/deep`, `meterless/cheap`,
+  `meterless/local`, `meterless/fusion`, plus `meterless/<class>` and
+  `meterless/<class>.<disposition>`. Unknown `meterless/*` ids are kept.
+
+`meterless/<routing-mode>` model names on AI personalities use the local
+runtime. Any other model id keeps using the hosted endpoint configured by
+`METERLESS_API_URL` and `METERLESS_API_KEY`.
+
+Optional environment variables:
+
+```bash
+METERLESS_APP_ID=ai-news-discussion          # stable lowercase id sent as meterless-app
+METERLESS_STATE_DIR=/path/to/runtime/state   # where the runtime writes proxy-token
+METERLESS_BASE_URL=http://127.0.0.1:8088/v1  # initial base URL (the UI can change it)
+SELO_SETTINGS_FILE=/path/to/settings.json    # provider settings, including the token
+```
+
+When running the server in Docker, set the base URL to
+`http://host.docker.internal:8088/v1`; the compose file adds the
+`host.docker.internal` gateway host.
+
+Verification:
+
+```bash
+npm run test:provider     # contract unit tests
+npm run verify:provider   # live checks against a mock and, if present, a real runtime on 8088
+```
+
 ### How AI Discussions Work
 
 1. When "Start Discussion" is clicked for a news item:
@@ -291,7 +345,7 @@ METERLESS_API_KEY=<PII_10>
 - **Frontend**: React 19, React Router 7, Axios 1.x, CSS3 (built with react-scripts)
 - **Backend**: Node.js 24 LTS, Express 5, WebSocket (ws)
 - **Database**: Zetaris (primary), In-memory fallback
-- **AI Integration**: Meterless API
+- **AI Integration**: Meterless Runtime provider + hosted Meterless API
 - **RSS Parsing**: rss-parser library
 - **Containerization**: Docker (multi-stage), nginx for the static client, Docker Compose
 
@@ -302,6 +356,7 @@ METERLESS_API_KEY=<PII_10>
 ```
 ├── server/             # Node.js Express server
 │   ├── index.js        # Main server file
+│   ├── providers/      # AI provider registry (Meterless Runtime + hosted Meterless)
 │   ├── Dockerfile      # Server image (node:24-alpine, multi-stage)
 │   ├── init/           # Zetaris init scripts
 │   └── initdb/         # PostgreSQL bootstrap SQL (audit DB)

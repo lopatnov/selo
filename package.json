@@ -13,6 +13,8 @@
     "server": "nodemon server/index.js",
     "client": "npm --prefix client start",
     "build": "npm --prefix client run build",
+    "test:provider": "node --test server/providers/meterless-runtime.test.js",
+    "verify:provider": "node scripts/verify-meterless-provider.cjs",
     "install-all": "npm install && npm --prefix client install"
   },
   "dependencies": {

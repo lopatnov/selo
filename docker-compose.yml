@@ -226,13 +226,20 @@ services:
       ZETARIS_URL: http://api:8888
       ZETARIS_API_KEY: ${ZETARIS_API_KEY:-}
 
-      # Meterless AI
+      # Meterless AI (hosted endpoint for non meterless/* model ids)
       METERLESS_API_URL: ${METERLESS_API_URL:-https://api.meterless.ai/v1}
       METERLESS_API_KEY: ${METERLESS_API_KEY:-}
+
+      # Meterless Runtime provider
+      METERLESS_APP_ID: ${METERLESS_APP_ID:-ai-news-discussion}
+      METERLESS_STATE_DIR: ${METERLESS_STATE_DIR:-/home/node/.meterless}
+      METERLESS_BASE_URL: ${METERLESS_BASE_URL:-}
 
       # Server config
       PORT: 3001
       NODE_ENV: production
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     ports:
       - "3001:3001"
     healthcheck:
@@ -243,6 +250,7 @@ services:
       retries: 5
     volumes:
       - ./server/init:/init:ro
+      - server-data:/app/server/data
 
   client:
     build:
@@ -270,3 +278,4 @@ volumes:
   driver-logs:
   customer-data:
   driver-data:
+  server-data:

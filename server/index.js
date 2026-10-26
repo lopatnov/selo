@@ -6,6 +6,9 @@ const WebSocket = require('ws');
 const http = require('node:http');
 require('dotenv').config();
 
+const { meterlessCloud, meterlessRuntime, providers } = require('./providers');
+const { createProvidersRouter } = require('./providers/routes');
+
 const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server });
@@ -22,6 +25,9 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', uptime: process.uptime() });
 });
 
+// AI providers (Meterless Runtime + existing hosted Meterless endpoint)
+app.use('/api/providers', createProvidersRouter({ runtime: meterlessRuntime, providers }));
+
 // In-memory storage (replace with Zetaris in production)
 const storage = {
   rssSources: [],
@@ -34,10 +40,6 @@ const storage = {
 // Zetaris configuration
 const ZETARIS_URL = process.env.ZETARIS_URL || 'http://localhost:8080';
 const ZETARIS_API_KEY = process.env.ZETARIS_API_KEY || '';
-
-// Meterless configuration
-const METERLESS_API_URL = process.env.METERLESS_API_URL || 'https://api.meterless.ai/v1';
-const METERLESS_API_KEY = process.env.METERLESS_API_KEY || '';
 
 // RSS Parser
 const parser = new Parser();
@@ -64,37 +66,31 @@ async function zetarisRequest(endpoint, method = 'GET', data = null) {
   }
 }
 
-// Helper: Call Meterless AI
+// Helper: Call Meterless AI.
+// `meterless/<routing-mode>` ids go to the local Meterless Runtime provider;
+// every other model id keeps using the existing hosted endpoint.
 async function callMeterlessAI(modelName, prompt, personality) {
-  const url = `${METERLESS_API_URL}/chat/completions`;
-  
-  const systemPrompt = `You are an AI with the following personality: ${personality}. 
+  const systemPrompt = `You are an AI with the following personality: ${personality}.
   You are discussing a news article and comments. Keep responses concise (2-3 sentences max).
   React naturally to both the news content and other comments.`;
-  
+
+  const model = typeof modelName === 'string' && modelName.trim() ? modelName.trim() : 'meterless/auto';
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    { role: 'user', content: prompt }
+  ];
+
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${METERLESS_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: modelName,
-        messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: prompt }
-        ],
-        max_tokens: 150,
-        temperature: 0.8
-      })
-    });
-    
-    const data = await response.json();
-    return data.choices[0]?.message?.content || 'No response from AI';
+    if (model.startsWith('meterless/')) {
+      return await meterlessRuntime.chat({ model, messages, max_tokens: 150, temperature: 0.8 });
+    }
+    return await meterlessCloud.chat({ model, messages, max_tokens: 150, temperature: 0.8 });
   } catch (error) {
-    console.error('Meterless AI request failed:', error);
-    return `[AI Error: ${error.message}]`;
+    // Never log the token or a connect link. Only the safe error message.
+    console.error(`Meterless request failed (${error.code || 'error'}): ${error.message}`);
+    return error.code === 'unauthorized'
+      ? '[Meterless rejected the token. Open AI Provider settings and paste the token from proxy-token.]'
+      : `[AI Error: ${error.message}]`;
   }
 }
 

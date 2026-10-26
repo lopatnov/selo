@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import API_BASE from '../api';
@@ -7,11 +7,28 @@ import API_BASE from '../api';
 function AddUser() {
   const navigate = useNavigate();
   const [name, setName] = useState('');
-  const [modelName, setModelName] = useState('');
+  const [modelName, setModelName] = useState('meterless/auto');
   const [personality, setPersonality] = useState('');
   const [isAI, setIsAI] = useState(true);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [models, setModels] = useState([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    axios
+      .get(`${API_BASE}/providers/meterless/models`)
+      .then(({ data }) => {
+        if (cancelled || !Array.isArray(data.models)) return;
+        setModels(data.models);
+      })
+      .catch(() => {
+        // The runtime list is optional; the field stays free text.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -48,15 +65,22 @@ function AddUser() {
         </div>
 
         <div className="form-group">
-          <label htmlFor="modelName">AI Model Name (Meterless)</label>
+          <label htmlFor="modelName">AI Model / Routing Mode (Meterless)</label>
           <input
             type="text"
             id="modelName"
+            list="meterless-model-options"
             value={modelName}
             onChange={(e) => setModelName(e.target.value)}
-            placeholder="e.g., gpt-4, claude-3-opus, llama-3-70b"
+            placeholder="e.g., meterless/auto, meterless/deep, gpt-4"
+            spellCheck="false"
             required
           />
+          <datalist id="meterless-model-options">
+            {models.map((model) => (
+              <option key={model} value={model} />
+            ))}
+          </datalist>
         </div>
 
         <div className="form-group">
@@ -102,7 +126,9 @@ function AddUser() {
           <li><strong>Ethicist:</strong> "Focuses on moral implications. Raises concerns about privacy, bias, societal impact."</li>
         </ul>
         <p style={{ marginTop: '1rem', color: '#7f8c8d' }}>
-          <strong>Note:</strong> The model name must match a model available in your Meterless configuration.
+          <strong>Note:</strong> <code>meterless/*</code> ids are routing modes served by Meterless
+          Runtime; other ids use the hosted Meterless endpoint. Configure the runtime under{' '}
+          <strong>AI Provider</strong>.
         </p>
       </div>
     </div>

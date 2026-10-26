@@ -20,5 +20,6 @@ Agents.txt
 caddy
 conf
 server/init
+server/data
 *.tar.gz
 *.zip
