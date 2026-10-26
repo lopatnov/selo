@@ -1,10 +1,9 @@
 const express = require('express');
 const cors = require('cors');
 const Parser = require('rss-parser');
-const { v4: uuidv4 } = require('uuid');
-const fetch = require('node-fetch');
+const { randomUUID } = require('node:crypto');
 const WebSocket = require('ws');
-const http = require('http');
+const http = require('node:http');
 require('dotenv').config();
 
 const app = express();
@@ -13,6 +12,15 @@ const wss = new WebSocket.Server({ server });
 
 app.use(cors());
 app.use(express.json());
+// Express 5 leaves req.body undefined when no JSON payload was sent
+app.use((req, res, next) => {
+  if (req.body === undefined) req.body = {};
+  next();
+});
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
 
 // In-memory storage (replace with Zetaris in production)
 const storage = {
@@ -197,7 +205,7 @@ async function addComment(newsId, userId, text, isAI = false) {
   if (!user) return null;
   
   const comment = {
-    id: uuidv4(),
+    id: randomUUID(),
     newsId,
     userId,
     userName: user.name,
@@ -226,7 +234,7 @@ async function fetchNewsFromRSS() {
         if (exists) continue;
         
         const newsItem = {
-          id: uuidv4(),
+          id: randomUUID(),
           sourceId: source.id,
           sourceName: source.name,
           title: item.title,
@@ -262,7 +270,7 @@ app.post('/api/rss-sources', async (req, res) => {
     return res.status(400).json({ error: 'Name and URL required' });
   }
   
-  const source = { id: uuidv4(), name, url, createdAt: new Date().toISOString() };
+  const source = { id: randomUUID(), name, url, createdAt: new Date().toISOString() };
   storage.rssSources.push(source);
   
   await zetarisRequest('/rss-sources', 'POST', source);
@@ -290,8 +298,8 @@ app.post('/api/users', async (req, res) => {
     return res.status(400).json({ error: 'Name, modelName, and personality required' });
   }
   
-  const user = { 
-    id: uuidv4(), 
+  const user = {
+    id: randomUUID(),
     name, 
     modelName, 
     personality, 
@@ -309,6 +317,41 @@ app.delete('/api/users/:id', async (req, res) => {
   storage.users = storage.users.filter(u => u.id !== req.params.id);
   await zetarisRequest(`/users/${req.params.id}`, 'DELETE');
   res.json({ success: true });
+});
+
+// Session handling for human participants (in-memory, no password store yet)
+app.post('/api/auth/login', (req, res) => {
+  const { name } = req.body;
+  if (!name) {
+    return res.status(400).json({ error: 'Name required' });
+  }
+
+  let user = storage.users.find(u => u.name === name);
+  if (!user) {
+    user = {
+      id: randomUUID(),
+      name,
+      modelName: 'human',
+      personality: 'Human participant',
+      isAI: false,
+      createdAt: new Date().toISOString()
+    };
+    storage.users.push(user);
+  }
+
+  const token = Buffer.from(user.id, 'utf8').toString('base64url');
+  res.json({ token, user });
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const auth = req.get('authorization') || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const userId = token ? Buffer.from(token, 'base64url').toString('utf8') : '';
+  const user = storage.users.find(u => u.id === userId);
+  if (!user) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  res.json(user);
 });
 
 // News
@@ -357,8 +400,24 @@ setInterval(fetchNewsFromRSS, 10 * 60 * 1000);
 // Initial fetch
 fetchNewsFromRSS();
 
+// Express error handler (Express 5 forwards rejected async handlers here)
+app.use((err, req, res, next) => {
+  console.error('Unhandled request error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
 const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
+server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`WebSocket server ready`);
 });
+
+const shutdown = (signal) => {
+  console.log(`${signal} received, shutting down`);
+  wss.close();
+  server.close(() => process.exit(0));
+  setTimeout(() => process.exit(1), 10000).unref();
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));

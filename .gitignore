@@ -155,3 +155,14 @@ vite.config.ts.timestamp-*
 docs/claude/
 
 .reference
+
+# Local build output
+client/build/
+build/
+
+# Playwright artifacts
+tests/test-results/
+tests/playwright-report/
+
+# Agent workspace config (local only)
+.roo/

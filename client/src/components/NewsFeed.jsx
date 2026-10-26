@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-const API_BASE = 'http://localhost:3001/api';
+import API_BASE, { WS_URL } from '../api';
 
 function NewsFeed() {
   const [news, setNews] = useState([]);
@@ -51,7 +51,7 @@ function NewsFeed() {
   };
 
   const connectWebSocket = () => {
-    wsRef.current = new WebSocket('ws://localhost:3001');
+    wsRef.current = new WebSocket(WS_URL);
     
     wsRef.current.onopen = () => {
       console.log('WebSocket connected');

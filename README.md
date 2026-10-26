@@ -159,9 +159,9 @@ If bootstrap is still running, wait for it to finish and rerun the verifier. If 
 
 After Zetaris is running:
 
-1. Our application runs on port 3002 (Docker: 3002 -> host: 3002)
-2. Zetaris UI on port 3000
-3. Zetaris API on port 8888
+1. Our application (nginx + built React bundle) runs on <http://localhost:3002>
+2. Zetaris UI is published on `UI_PORT` (`3010` in `.env`, so it does not clash with a standalone `zetaris-platform` stack on 3000)
+3. Zetaris API is published on `API_PORT` (`8898`; the server container still reaches it as `http://api:8888`)
 4. Configure our application's `.env` with:
    - `ZETARIS_URL`: `http://host.docker.internal:8888` (from inside Docker)
    - `ZETARIS_API_KEY`: API key created in Zetaris GUI
@@ -288,12 +288,12 @@ METERLESS_API_KEY=<PII_10>
 
 ## Technologies Used
 
-- **Frontend**: React 18, React Router, Axios, CSS3
-- **Backend**: Node.js, Express.js, WebSocket (ws)
+- **Frontend**: React 19, React Router 7, Axios 1.x, CSS3 (built with react-scripts)
+- **Backend**: Node.js 24 LTS, Express 5, WebSocket (ws)
 - **Database**: Zetaris (primary), In-memory fallback
 - **AI Integration**: Meterless API
 - **RSS Parsing**: rss-parser library
-- **Containerization**: Docker, Docker Compose
+- **Containerization**: Docker (multi-stage), nginx for the static client, Docker Compose
 
 ---
 
@@ -302,19 +302,23 @@ METERLESS_API_KEY=<PII_10>
 ```
 ├── server/             # Node.js Express server
 │   ├── index.js        # Main server file
-│   ├── package.json    # Server dependencies
-│   └── init/           # Zetaris init scripts
+│   ├── Dockerfile      # Server image (node:24-alpine, multi-stage)
+│   ├── init/           # Zetaris init scripts
+│   └── initdb/         # PostgreSQL bootstrap SQL (audit DB)
 │
 ├── client/             # React frontend
 │   ├── src/            # Source files
 │   │   ├── App.jsx     # Main component
+│   │   ├── api.js      # API/WebSocket base URLs + auth helpers
 │   │   ├── components/ # Reusable components
 │   │   ├── index.js    # Entry point
 │   │   └── App.css     # Styles
+│   ├── Dockerfile      # Multi-stage build (node:24-alpine -> nginx:alpine)
+│   ├── nginx.conf      # SPA fallback + asset caching
 │   └── package.json    # Client dependencies
 │
-├── Dockerfile.client   # Client Dockerfile (nginx)
-├── Dockerfile.server   # Server Dockerfile
+├── package.json        # Server dependencies and dev scripts
+├── package-lock.json   # Locked server dependency tree
 ├── docker-compose.yml  # Full orchestration
 ├── .env                # Production config
 ├── .env.example        # Template
@@ -346,13 +350,13 @@ METERLESS_API_KEY=<PII_10>
 #    - METERLESS_API_URL: https://api.meterless.ai/v1
 #    - METERLESS_API_KEY: <your key>
 
-# 3. Start our application services:
+# 3. Start the whole stack (Zetaris + our app):
 docker compose up --build -d
 
 # 3. Access:
 #    - Our Application: http://localhost:3002
-#    - Zetaris UI: http://localhost:3000
-#    - Zetaris API: http://host.docker.internal:8888
+#    - Zetaris UI: http://localhost:3010  (UI_PORT in .env)
+#    - Zetaris API: http://localhost:8898 (API_PORT in .env)
 
 # 4. First-time Application Setup:
 #    1. Open http://localhost:3002
@@ -363,13 +367,23 @@ docker compose up --build -d
 
 ### Development Mode (Without Full Zetaris)
 ```bash
-# Terminal 1: Server
-cd server && npm start
+# Requires Node.js 22+ (the Docker images use Node 24 LTS)
+npm install
+npm --prefix client install
 
-# Terminal 2: Client
-cd client && npm start
+# Terminal 1: Server (Express 5, port 3001)
+npm start
+
+# Terminal 2: Client (CRA dev server, port 3002)
+npm --prefix client start
 # Uses in-memory storage (no Zetaris required)
 ````
+
+### Local Production Build
+
+```bash
+npm --prefix client run build   # static bundle in client/build
+```
 
 ### Stopping & Cleanup
 

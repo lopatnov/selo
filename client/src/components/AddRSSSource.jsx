@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
-const API_BASE = 'http://localhost:3001/api';
+import API_BASE from '../api';
 
 function AddRSSSource() {
   const navigate = useNavigate();

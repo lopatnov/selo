@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-const API_BASE = 'http://localhost:3001/api';
+import API_BASE from '../api';
 
 function UsersList() {
   const [users, setUsers] = useState([]);
