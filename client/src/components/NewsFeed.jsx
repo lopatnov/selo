@@ -2,7 +2,7 @@ import axios from 'axios';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import API_BASE, { WS_URL } from '../api';
+import API_BASE, { WS_URL, getParticipant } from '../api';
 
 function NewsFeed() {
   const [news, setNews] = useState([]);
@@ -11,15 +11,15 @@ function NewsFeed() {
   const [comments, setComments] = useState({});
   const [discussionActive, setDiscussionActive] = useState({});
   const [newCommentText, setNewCommentText] = useState('');
-  const [currentUserId, setCurrentUserId] = useState(null);
+  const [participant, setParticipant] = useState(null);
   const wsRef = useRef(null);
   const commentsEndRef = useRef(null);
 
   useEffect(() => {
     fetchNews();
-    fetchCurrentUser();
+    loadParticipant();
     connectWebSocket();
-    
+
     return () => {
       if (wsRef.current) wsRef.current.close();
     };
@@ -36,17 +36,12 @@ function NewsFeed() {
     }
   };
 
-  const fetchCurrentUser = async () => {
-    const token = localStorage.getItem('token');
-    if (token) {
-      try {
-        const response = await axios.get(`${API_BASE}/auth/me`, {
-          headers: { Authorization: `Bearer ${token}` }
-        });
-        setCurrentUserId(response.data.id);
-      } catch (error) {
-        console.log('Not authenticated');
-      }
+  // No login: the server hands out the one local participant.
+  const loadParticipant = async () => {
+    try {
+      setParticipant(await getParticipant());
+    } catch (error) {
+      console.error('Failed to load the local participant:', error);
     }
   };
 
@@ -131,18 +126,18 @@ function NewsFeed() {
   };
 
   const handleAddComment = async (newsId) => {
-    if (!newCommentText.trim() || !currentUserId) return;
-    
+    if (!newCommentText.trim() || !participant) return;
+
     try {
       await axios.post(`${API_BASE}/comments`, {
         newsId,
-        userId: currentUserId,
+        userId: participant.id,
         text: newCommentText.trim()
       });
       setNewCommentText('');
     } catch (error) {
       console.error('Failed to add comment:', error);
-      alert('Failed to add comment. Please login first.');
+      alert(error.response?.data?.error || 'Failed to add comment.');
     }
   };
 
@@ -165,7 +160,7 @@ function NewsFeed() {
       <div className="card-header" style={{ paddingBottom: 0 }}>
         <h2 className="card-title">📰 News Feed</h2>
         <div style={{ display: 'flex', gap: '0.5rem' }}>
-          <Link to="/add-rss" className="btn btn-primary">+ Add RSS Source</Link>
+          <Link to="/sources" className="btn btn-primary">📡 RSS Sources</Link>
           <button className="btn btn-secondary" onClick={fetchNews}>🔄 Refresh</button>
         </div>
       </div>
@@ -173,7 +168,8 @@ function NewsFeed() {
       {news.length === 0 ? (
         <div className="card" style={{ textAlign: 'center', padding: '3rem' }}>
           <p style={{ color: '#95a5a6', marginBottom: '1rem' }}>No news yet. Add an RSS source to get started.</p>
-          <Link to="/add-rss" className="btn btn-primary">Add RSS Source</Link>
+          <Link to="/add-rss" className="btn btn-primary">Add RSS Source</Link>{' '}
+          <Link to="/sources" className="btn btn-secondary">Manage sources</Link>
         </div>
       ) : (
         news.map(item => (
@@ -251,29 +247,26 @@ function NewsFeed() {
                     <div ref={commentsEndRef}></div>
                   </div>
 
-                  {currentUserId && (
-                    <div className="add-comment-form">
-                      <textarea
-                        value={newCommentText}
-                        onChange={(e) => setNewCommentText(e.target.value)}
-                        placeholder="Add your comment..."
-                        rows={3}
-                      />
-                      <button 
-                        className="btn btn-primary" 
-                        onClick={() => handleAddComment(item.id)}
-                        disabled={!newCommentText.trim()}
-                      >
-                        Send
-                      </button>
-                    </div>
-                  )}
-
-                  {!currentUserId && (
-                    <div className="add-comment-form" style={{ justifyContent: 'center', color: '#95a5a6' }}>
-                      <span>Please login to add comments</span>
-                    </div>
-                  )}
+                  <div className="add-comment-form">
+                    <textarea
+                      value={newCommentText}
+                      onChange={(e) => setNewCommentText(e.target.value)}
+                      placeholder={
+                        participant
+                          ? `Add your comment as ${participant.name}...`
+                          : 'Loading your local profile...'
+                      }
+                      rows={3}
+                      disabled={!participant}
+                    />
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => handleAddComment(item.id)}
+                      disabled={!participant || !newCommentText.trim()}
+                    >
+                      Send
+                    </button>
+                  </div>
                 </div>
               </>
             )}

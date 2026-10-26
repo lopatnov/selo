@@ -7,12 +7,20 @@ const STATUS_LABELS = {
   online: 'Online',
   unauthorized: 'Unauthorized',
   offline: 'Offline',
+  unconfigured: 'Not configured',
   checking: 'Checking…'
 };
 
 const DEFAULT_MODELS = ['auto', 'fast', 'deep', 'cheap', 'local', 'fusion'].map(
   disposition => `meterless/${disposition}`
 );
+
+const TOKEN_SOURCE_LABELS = {
+  env: 'environment',
+  settings: 'saved in this app',
+  'proxy-token': 'runtime proxy-token file',
+  none: 'missing'
+};
 
 function readError(error) {
   return error.response?.data?.error || error.message || 'Request failed';
@@ -21,7 +29,7 @@ function readError(error) {
 function StatusBadge({ status }) {
   const kind = STATUS_LABELS[status] ? status : 'offline';
   return (
-    <span className={`provider-status status-${kind}`}>
+    <span className={`provider-status status-${kind === 'unconfigured' ? 'offline' : kind}`}>
       <span className="provider-dot" />
       {STATUS_LABELS[kind] || kind}
     </span>
@@ -46,6 +54,12 @@ function ProviderSettings() {
   const [testPrompt, setTestPrompt] = useState('Say hello in one short sentence.');
   const [testResult, setTestResult] = useState('');
   const [testError, setTestError] = useState('');
+
+  const [zetaris, setZetaris] = useState(null);
+  const [zetarisBusy, setZetarisBusy] = useState('');
+  const [zetarisSql, setZetarisSql] = useState('SELECT 1 AS one');
+  const [zetarisResult, setZetarisResult] = useState(null);
+  const [zetarisError, setZetarisError] = useState('');
 
   const applyConfig = useCallback(data => {
     setConfig(data);
@@ -80,9 +94,23 @@ function ProviderSettings() {
     }
   }, [applyConfig, fetchModels]);
 
+  const loadZetaris = useCallback(async () => {
+    setZetarisBusy('status');
+    setZetarisError('');
+    try {
+      const { data } = await axios.get(`${API_BASE}/zetaris`);
+      setZetaris(data);
+    } catch (err) {
+      setZetarisError(readError(err));
+    } finally {
+      setZetarisBusy('');
+    }
+  }, []);
+
   useEffect(() => {
     load();
-  }, [load]);
+    loadZetaris();
+  }, [load, loadZetaris]);
 
   const handleSave = async event => {
     event.preventDefault();
@@ -165,14 +193,37 @@ function ProviderSettings() {
     }
   };
 
+  const handleZetarisQuery = async event => {
+    event.preventDefault();
+    setZetarisBusy('query');
+    setZetarisError('');
+    setZetarisResult(null);
+    try {
+      const { data } = await axios.post(`${API_BASE}/zetaris/query`, {
+        sql: zetarisSql,
+        limit: 25
+      });
+      setZetarisResult(data);
+    } catch (err) {
+      setZetarisError(readError(err));
+    } finally {
+      setZetarisBusy('');
+    }
+  };
+
   const statusKind = status?.status || 'checking';
   const unauthorized = statusKind === 'unauthorized';
+  const tokenSource = config?.tokenSource || 'none';
+  const zetarisStatus = zetaris?.status?.status || 'checking';
 
   return (
     <div>
       <div className="card-header" style={{ paddingBottom: 0 }}>
         <h2 className="card-title">🔌 AI Providers</h2>
-        <StatusBadge status={statusKind} />
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <StatusBadge status={statusKind} />
+          <StatusBadge status={zetarisStatus} />
+        </div>
       </div>
 
       {loading && <div className="card">Checking Meterless Runtime…</div>}
@@ -183,7 +234,9 @@ function ProviderSettings() {
       {unauthorized && (
         <div className="provider-alert warning">
           The runtime rejected the token. Paste the token written to{' '}
-          <code>{'<stateDir>/proxy-token'}</code>. The placeholder <code>rt-local</code> is rejected.
+          <code>{'<stateDir>/proxy-token'}</code>, or set{' '}
+          <code>METERLESS_API_KEY</code> / <code>METERLESS_RUNTIME_TOKEN</code> in{' '}
+          <code>.env</code>. The placeholder <code>rt-local</code> is rejected.
         </div>
       )}
 
@@ -229,8 +282,14 @@ function ProviderSettings() {
               spellCheck="false"
             />
             <small className="provider-hint">
-              Stored under <code>meterless_runtime_token</code> and sent as{' '}
-              <code>Authorization: Bearer</code> on every call. It is never returned by the API.
+              Precedence: a token saved here, then the environment, then the runtime{' '}
+              <code>proxy-token</code> file. It is never returned by the API.
+              {config?.tokenSource === 'env' && (
+                <>
+                  {' '}Currently taken from <code>{config.tokenEnvVar || 'METERLESS_API_KEY'}</code> in{' '}
+                  <code>.env</code>.
+                </>
+              )}
               {config?.tokenSource === 'proxy-token' && ' Currently using proxy-token from the runtime state directory.'}
             </small>
           </div>
@@ -261,6 +320,10 @@ function ProviderSettings() {
               {status?.httpStatus ? ` · HTTP ${status.httpStatus}` : ''}
               {status?.reason ? ` · ${status.reason}` : ''}
             </dd>
+          </div>
+          <div>
+            <dt>Token source</dt>
+            <dd>{TOKEN_SOURCE_LABELS[tokenSource] || tokenSource}</dd>
           </div>
           <div>
             <dt>App id</dt>
@@ -362,6 +425,101 @@ function ProviderSettings() {
           <div>
             <div className="provider-output-label">Response (string)</div>
             <pre className="provider-output">{testResult}</pre>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
+        <div className="card-header" style={{ paddingBottom: '0.5rem' }}>
+          <h3 className="provider-section-title">Zetaris</h3>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            <StatusBadge status={zetarisStatus} />
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={loadZetaris}
+              disabled={zetarisBusy === 'status'}
+            >
+              {zetarisBusy === 'status' ? 'Checking…' : 'Re-check status'}
+            </button>
+          </div>
+        </div>
+        <p className="provider-note">
+          Read from <code>ZETARIS_API_KEY</code>, <code>ZETARIS_ORG_ID</code> and{' '}
+          <code>ZETARIS_URL</code> in <code>.env</code>. The status is honest:{' '}
+          <code>SELECT 1</code> must come back with <code>1</code> through{' '}
+          <code>POST /sql-editor/sqls/run</code>.
+        </p>
+
+        {zetaris?.status?.status === 'unauthorized' && (
+          <div className="provider-alert warning">
+            Zetaris refused the key. <code>X-Org-ID</code> must be the numeric organisation id
+            that owns <code>ZETARIS_API_KEY</code>, not the organisation name.
+          </div>
+        )}
+
+        <dl className="provider-facts">
+          <div>
+            <dt>Status</dt>
+            <dd>
+              <StatusBadge status={zetarisStatus} />
+              {zetaris?.status?.latencyMs !== undefined ? ` · ${zetaris.status.latencyMs} ms` : ''}
+              {zetaris?.status?.reason ? ` · ${zetaris.status.reason}` : ''}
+            </dd>
+          </div>
+          <div>
+            <dt>REST URL</dt>
+            <dd><code>{zetaris?.restUrl || '…'}</code></dd>
+          </div>
+          <div>
+            <dt>Organisation id</dt>
+            <dd><code>{zetaris?.orgId || '…'}</code></dd>
+          </div>
+          <div>
+            <dt>API key</dt>
+            <dd>{zetaris?.hasKey ? 'set in .env' : 'MISSING — set ZETARIS_API_KEY'}</dd>
+          </div>
+        </dl>
+
+        <form onSubmit={handleZetarisQuery} style={{ marginTop: '1rem' }}>
+          <div className="form-group">
+            <label htmlFor="zetaris-sql">Read-only SQL</label>
+            <textarea
+              id="zetaris-sql"
+              value={zetarisSql}
+              onChange={event => setZetarisSql(event.target.value)}
+              rows={3}
+              spellCheck="false"
+              placeholder="SELECT 1 AS one"
+            />
+            <small className="provider-hint">
+              Only a single <code>SELECT</code>, <code>SHOW</code>, <code>DESCRIBE</code> or{' '}
+              <code>WITH</code> statement is accepted here.
+            </small>
+          </div>
+          <div className="provider-actions">
+            <button
+              type="submit"
+              className="btn btn-success"
+              disabled={zetarisBusy === 'query'}
+            >
+              {zetarisBusy === 'query' ? 'Running…' : 'Run query'}
+            </button>
+          </div>
+        </form>
+
+        {zetarisError && <div className="provider-alert error">{zetarisError}</div>}
+        {zetarisResult && (
+          <div>
+            <div className="provider-output-label">
+              {zetarisResult.rows?.length || 0} row(s)
+              {zetarisResult.timeUsedMs ? ` · ${zetarisResult.timeUsedMs} ms` : ''}
+            </div>
+            <pre className="provider-output">
+              {[zetarisResult.headers?.join(' | '), ...(zetarisResult.rows || []).map(row => row.join(' | '))]
+                .filter(Boolean)
+                .join('\n')}
+            </pre>
           </div>
         )}
       </div>

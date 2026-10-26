@@ -76,11 +76,12 @@ function extractModelIds(body) {
 }
 
 function createMeterlessRuntime(options = {}) {
+  const env = options.env || process.env;
   const store = options.settings || new SettingsStore(options.settingsFile || defaultSettingsFile());
   const fetchImpl = options.fetchImpl || globalThis.fetch;
-  const appId = normalizeAppId(options.appId || process.env.METERLESS_APP_ID || DEFAULT_APP_ID);
+  const appId = normalizeAppId(options.appId || env.METERLESS_APP_ID || DEFAULT_APP_ID);
   const stateDir =
-    options.stateDir || process.env.METERLESS_STATE_DIR || path.join(os.homedir(), '.meterless');
+    options.stateDir || env.METERLESS_STATE_DIR || path.join(os.homedir(), '.meterless');
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('Meterless Runtime provider needs a fetch implementation.');
@@ -95,10 +96,22 @@ function createMeterlessRuntime(options = {}) {
     }
   }
 
+  /**
+   * Precedence: a token saved from the UI wins, then the environment (so a
+   * fresh install is configured straight from .env), then the runtime's own
+   * proxy-token file. METERLESS_RUNTIME_TOKEN is the runtime's native name;
+   * METERLESS_API_KEY is the one this deployment already ships.
+   */
   function resolveToken() {
     const stored = store.get(KEY_TOKEN);
     if (isUsableToken(stored)) {
       return { token: stored.trim(), source: 'settings' };
+    }
+    for (const name of ['METERLESS_RUNTIME_TOKEN', 'METERLESS_API_KEY']) {
+      const value = env[name];
+      if (isUsableToken(value)) {
+        return { token: String(value).trim(), source: 'env', envVar: name };
+      }
     }
     const fromFile = readProxyToken();
     if (isUsableToken(fromFile)) {
@@ -108,7 +121,7 @@ function createMeterlessRuntime(options = {}) {
   }
 
   function resolveBaseUrl() {
-    const stored = store.get(KEY_BASE_URL) || process.env.METERLESS_BASE_URL || DEFAULT_BASE_URL;
+    const stored = store.get(KEY_BASE_URL) || env.METERLESS_BASE_URL || DEFAULT_BASE_URL;
     try {
       return normalizeBaseUrl(stored);
     } catch {
@@ -117,7 +130,7 @@ function createMeterlessRuntime(options = {}) {
   }
 
   function getConfig() {
-    const { token, source } = resolveToken();
+    const { token, source, envVar } = resolveToken();
     return {
       id: PROVIDER_ID,
       name: PROVIDER_NAME,
@@ -127,6 +140,7 @@ function createMeterlessRuntime(options = {}) {
       appId,
       hasToken: Boolean(token),
       tokenSource: source,
+      tokenEnvVar: envVar || null,
       chatTimeoutMs: CHAT_TIMEOUT_MS
     };
   }

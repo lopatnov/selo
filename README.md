@@ -198,21 +198,33 @@ All persistent data is stored in **Docker named volumes** managed by the Zetaris
 - **Authentication**: User accounts, organizations, API keys
 - **File System**: NDP file system data (`customer-data` volume)
 
-#### Our Application Data (stored via Zetaris API):
+#### Our Application Data
 
-All our application data is stored **in Zetaris** via its REST API:
+Zetaris exposes **SQL, not CRUD resources**: there is no `/users`, `/news` or
+`/comments` endpoint on a Zetaris instance. Its documented write/read surface is
+the SQL editor route (`POST <rest url>/sql-editor/sqls/run`), and its tables are
+CSV/filesystem-backed lightning tables, not a row-by-row application store.
 
-| Data Type                  | Stored In           | How                                                 |
-| -------------------------- | ------------------- | --------------------------------------------------- |
-| **RSS Sources**            | Zetaris tables      | Via `POST /api/rss-sources` → Zetaris REST API      |
-| **Users/AI Personalities** | Zetaris tables      | Via `POST /api/users` → Zetaris REST API            |
-| **News Articles**          | Zetaris tables      | Via `POST /api/news` → Zetaris REST API             |
-| **Comments**               | Zetaris tables      | Via `POST /api/comments` → Zetaris REST API         |
-| **Discussion Status**      | In-memory + Zetaris | In-memory for active sessions, persisted to Zetaris |
+So the app owns its data in one JSON document and uses Zetaris as the
+SQL/analytics surface:
 
-#### In-Memory Fallback:
+| Data Type                  | Stored In                                                                                                      |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| **RSS Sources**            | `server/data/state.json` → `rssSources[]` — every feed in the list is polled                                   |
+| **Users/AI Personalities** | `server/data/state.json` → `users[]`                                                                           |
+| **News Articles**          | `server/data/state.json` → `news[]` (newest 1000)                                                              |
+| **Comments**               | `server/data/state.json` → `comments[]` (newest 5000)                                                          |
+| **Discussion State**       | Server memory only — active timers die with the process                                                        |
+| **Zetaris access**         | REST SQL: `GET /api/zetaris` (status), `POST /api/zetaris/query` (read-only `SELECT`/`SHOW`/`DESCRIBE`/`WITH`) |
 
-If Zetaris API is unavailable, the server falls back to **in-memory storage** (lost on restart).
+`server/data/` is in `.gitignore` and is the `server-data` Docker volume, so the
+feed list, the personalities and the discussion history survive a restart.
+`SELO_STATE_FILE` overrides the path. Writes are atomic (tmp file + rename) and
+debounced, and the file is flushed on `SIGTERM`/`SIGINT`.
+
+Zetaris connectivity is real and visible: the AI Provider page shows `online` /
+`unauthorized` / `offline` / `not configured`, decided by running `SELECT 1`
+through the REST API.
 
 ---
 
@@ -220,22 +232,29 @@ If Zetaris API is unavailable, the server falls back to **in-memory storage** (l
 
 ### How RSS is Used
 
-**RSS is used as a DATA SOURCE, not as primary storage.**
+**RSS feeds are a DATA SOURCE. The list of feeds and the fetched items are kept
+by the app itself.**
 
-1. **RSS Fetching** (every 10 minutes by default):
-   - Server polls configured RSS URLs
-   - Parses feed items using `rss-parser` library
-   - Extracts: title, content, link, publication date
+1. **RSS Fetching** — every source in the list, every 10 minutes, plus once
+   shortly after boot and immediately when a source is added:
+   - `POST /api/rss-sources` appends a feed (duplicates by URL are refused, `409`)
+   - `POST /api/rss-sources/:id/fetch` polls a single feed
+   - `POST /api/news/fetch` polls all of them and reports per-source results
+   - Up to 10 newest items per feed per run, parsed with `rss-parser`
 
 2. **Deduplication**:
-   - Checks if article link already exists in Zetaris
-   - Only stores NEW articles
+   - Article links already present in `news[]` are skipped
+   - Only NEW articles are added
 
 3. **Storage Flow**:
 
    ```
-   RSS Feed → Parser → Deduplication → Zetaris REST API → Zetaris Tables
+   RSS feed → parser → dedupe by link → state.news[] (server/data/state.json)
+                                      → broadcast news_updated over WebSocket
    ```
+
+   Each source also records `lastFetchedAt`, `lastError` and `lastItemCount`, so
+   the **RSS Sources** page shows the state of every feed.
 
 4. **Data Stored from RSS**:
    - `title` - Article title
@@ -256,7 +275,14 @@ If Zetaris API is unavailable, the server falls back to **in-memory storage** (l
 ### Manual RSS Fetch
 
 ```bash
+# every source
 curl -X POST http://localhost:3001/api/news/fetch
+
+# one source
+curl -X POST http://localhost:3001/api/rss-sources/<id>/fetch
+
+# the list (with item counts and last fetch result)
+curl http://localhost:3001/api/rss-sources
 ```
 
 ---
@@ -270,6 +296,14 @@ curl -X POST http://localhost:3001/api/news/fetch
 METERLESS_API_URL=https://api.meterless.ai/v1
 METERLESS_API_KEY=<PII_10>
 ```
+
+`METERLESS_API_KEY` is also the **Meterless Runtime token**, so the runtime
+provider is configured from `.env` on a fresh install and reports **Online**
+without pasting anything. Precedence for that token:
+
+1. a token saved from the AI Provider page (`meterless_runtime_token` in settings),
+2. `METERLESS_RUNTIME_TOKEN`, then `METERLESS_API_KEY` from the environment,
+3. `<stateDir>/proxy-token` written by the runtime.
 
 ### Meterless Runtime provider
 
@@ -312,23 +346,51 @@ METERLESS_APP_ID=ai-news-discussion          # stable lowercase id sent as meter
 METERLESS_STATE_DIR=/path/to/runtime/state   # where the runtime writes proxy-token
 METERLESS_BASE_URL=http://127.0.0.1:8088/v1  # initial base URL (the UI can change it)
 SELO_SETTINGS_FILE=/path/to/settings.json    # provider settings, including the token
+SELO_STATE_FILE=/path/to/state.json          # RSS sources, users, news, comments
 ```
 
-When running the server in Docker, set the base URL to
-`http://host.docker.internal:8088/v1`; the compose file adds the
-`host.docker.internal` gateway host.
+A runtime bound to `127.0.0.1` on the host is **not reachable from a container**.
+For Docker runs point `METERLESS_BASE_URL` at an address the container can reach
+or paste a connect link in the AI Provider page; for host runs the default
+`http://127.0.0.1:8088/v1` is correct.
+
+### Zetaris configuration
+
+```bash
+ZETARIS_API_KEY=<key created in the Zetaris GUI>
+ZETARIS_ORG_ID=806                 # NUMERIC organisation id that owns the key
+# ZETARIS_URL=127.0.0.1:8888       # optional; default for host runs
+```
+
+The app talks to `POST <rest url>/sql-editor/sqls/run` with
+`Authorization: Bearer <key>`, `X-Org-ID: <numeric id>` and a fresh
+`X-Request-ID`. Two mistakes produce an HTTP 400 instead of a clear message, and
+both are handled explicitly:
+
+| Answer                       | Meaning                                           |
+| ---------------------------- | ------------------------------------------------- |
+| `400 {"msg":"Not Allowed"}`  | `ZETARIS_ORG_ID` is not the id that owns the key  |
+| `400 Invalid value for: ...` | `ZETARIS_ORG_ID` is not numeric (a name was used) |
+| `401`                        | the key is missing or revoked                     |
+| `200 {"data":[["1"]]}`       | `SELECT 1` works, so the provider is **online**   |
+
+The AI Provider page shows the Zetaris state and lets you run one read-only
+statement; `POST /api/zetaris/query` refuses anything that is not a single
+`SELECT`, `SHOW`, `DESCRIBE` or `WITH`.
 
 Verification:
 
 ```bash
-npm run test:provider     # contract unit tests
+npm test                  # provider + Zetaris contract unit tests (22 tests)
 npm run verify:provider   # live checks against a mock and, if present, a real runtime on 8088
+npm run check:connections # live Meterless Runtime + Zetaris probes using the real modules
+npm run smoke             # boots the API and checks the no-login flow end to end
 ```
 
 ### How AI Discussions Work
 
 1. When "Start Discussion" is clicked for a news item:
-   - System fetches all AI personalities from Zetaris
+   - Every AI personality in the app is used
    - Each AI generates initial response to news content
    - AI models periodically respond to each other's comments
    - Responses limited to 2-3 sentences, temperature 0.8
@@ -344,10 +406,25 @@ npm run verify:provider   # live checks against a mock and, if present, a real r
 
 - **Frontend**: React 19, React Router 7, Axios 1.x, CSS3 (built with react-scripts)
 - **Backend**: Node.js 24 LTS, Express 5, WebSocket (ws)
-- **Database**: Zetaris (primary), In-memory fallback
+- **Storage**: server memory; Zetaris is queried over its REST SQL API
 - **AI Integration**: Meterless Runtime provider + hosted Meterless API
 - **RSS Parsing**: rss-parser library
 - **Containerization**: Docker (multi-stage), nginx for the static client, Docker Compose
+
+### Pages
+
+There is **no login page and no authentication** anywhere in the app. Three
+pages, open by design:
+
+| Page            | Route        | What it does                                             |
+| --------------- | ------------ | -------------------------------------------------------- |
+| **News Feed**   | `/feed`      | RSS items, discussion start/stop, comments               |
+| **RSS Sources** | `/sources`   | Every feed, item count, last fetch result, fetch/delete  |
+| **Users**       | `/users`     | AI personalities (name, routing mode, personality)       |
+| **AI Provider** | `/providers` | Meterless Runtime + Zetaris status, models, test queries |
+
+Comments are posted as the single local participant that the server creates on
+first use (`GET /api/participant`), so nothing has to be signed in.
 
 ---
 
@@ -355,7 +432,11 @@ npm run verify:provider   # live checks against a mock and, if present, a real r
 
 ```
 ├── server/             # Node.js Express server
-│   ├── index.js        # Main server file
+│   ├── index.js        # Main server file (no auth routes)
+│   ├── zetaris.js      # Zetaris REST SQL client (POST /sql-editor/sqls/run)
+│   ├── zetaris.test.js # Contract unit tests
+│   ├── state-store.js  # Atomic, debounced JSON persistence (server/data/state.json)
+│   ├── state-store.test.js # Round-trip, corrupt-file and cap tests
 │   ├── providers/      # AI provider registry (Meterless Runtime + hosted Meterless)
 │   ├── Dockerfile      # Server image (node:24-alpine, multi-stage)
 │   ├── init/           # Zetaris init scripts
@@ -363,15 +444,16 @@ npm run verify:provider   # live checks against a mock and, if present, a real r
 │
 ├── client/             # React frontend
 │   ├── src/            # Source files
-│   │   ├── App.jsx     # Main component
-│   │   ├── api.js      # API/WebSocket base URLs + auth helpers
-│   │   ├── components/ # Reusable components
+│   │   ├── App.jsx     # Routes: /feed, /sources, /users, /providers
+│   │   ├── api.js      # API/WebSocket base URLs + local participant
+│   │   ├── components/ # NewsFeed, SourcesList, UsersList, ProviderSettings, forms
 │   │   ├── index.js    # Entry point
 │   │   └── App.css     # Styles
 │   ├── Dockerfile      # Multi-stage build (node:24-alpine -> nginx:alpine)
 │   ├── nginx.conf      # SPA fallback + asset caching
 │   └── package.json    # Client dependencies
 │
+├── scripts/            # check-connections.cjs, smoke-test.cjs, verify-meterless-provider.cjs
 ├── package.json        # Server dependencies and dev scripts
 ├── package-lock.json   # Locked server dependency tree
 ├── docker-compose.yml  # Full orchestration
@@ -401,9 +483,10 @@ npm run verify:provider   # live checks against a mock and, if present, a real r
 # 2. Configure our application .env:
 #    From the project root (C:\projects\selo):
 #    - ZETARIS_URL: http://host.docker.internal:8888
-#    - ZETARIS_API_KEY: <your key from Zetaris GUI>
+#    - ZETARIS_API_KEY: <key created in THAT stack's Zetaris GUI at :3010>
+#    - ZETARIS_ORG_ID: <numeric organisation id that owns the key>
 #    - METERLESS_API_URL: https://api.meterless.ai/v1
-#    - METERLESS_API_KEY: <your key>
+#    - METERLESS_API_KEY: <your key; also the Meterless Runtime token>
 
 # 3. Start the whole stack (Zetaris + our app):
 docker compose up --build -d
@@ -413,14 +496,15 @@ docker compose up --build -d
 #    - Zetaris UI: http://localhost:3010  (UI_PORT in .env)
 #    - Zetaris API: http://localhost:8898 (API_PORT in .env)
 
-# 4. First-time Application Setup:
-#    1. Open http://localhost:3002
+# 4. First-time Application Setup (no login anywhere):
+#    1. Open http://localhost:3002 → News Feed
 #    2. Add RSS sources (e.g., https://techcrunch.com/feed/)
-#    2. Create AI personalities with Meterless model names
-#    3. Click news items → "Start Discussion"
-#    4. Add your comments, watch AI react
+#    3. Create AI personalities on Users (meterless/auto, meterless/deep, …)
+#    4. Click news items → "Start Discussion"
+#    5. Add your comments, watch AI react
+#    6. Open AI Provider to see Meterless Runtime and Zetaris status
 
-### Development Mode (Without Full Zetaris)
+### Development Mode (the path verified against a live stack)
 ```bash
 # Requires Node.js 22+ (the Docker images use Node 24 LTS)
 npm install
@@ -429,9 +513,13 @@ npm --prefix client install
 # Terminal 1: Server (Express 5, port 3001)
 npm start
 
-# Terminal 2: Client (CRA dev server, port 3002)
+# Terminal 2: Client (CRA dev server, port 3000 by default)
 npm --prefix client start
-# Uses in-memory storage (no Zetaris required)
+
+# Collections live in the server process; Meterless Runtime on
+# 127.0.0.1:8088 and Zetaris on 127.0.0.1:8888 are reachable as-is.
+npm run check:connections   # both probes, using the real modules
+npm run smoke               # boots the API and checks the no-login flow
 ````
 
 ### Local Production Build

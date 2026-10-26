@@ -37,7 +37,7 @@ function jsonResponse(status, body) {
   };
 }
 
-function makeRuntime({ fetchImpl, dir = tempDir(), token = 'rt-test', baseUrl = null } = {}) {
+function makeRuntime({ fetchImpl, dir = tempDir(), token = 'rt-test', baseUrl = null, env = {} } = {}) {
   const store = new SettingsStore(path.join(dir, 'settings.json'));
   if (token !== null) store.set(KEY_TOKEN, token);
   if (baseUrl) store.set(KEY_BASE_URL, baseUrl);
@@ -46,7 +46,8 @@ function makeRuntime({ fetchImpl, dir = tempDir(), token = 'rt-test', baseUrl = 
     settings: store,
     stateDir: dir,
     appId: 'test-app',
-    fetchImpl
+    fetchImpl,
+    env
   });
 
   return { runtime, store, dir };
@@ -261,6 +262,55 @@ test('listModels keeps unknown meterless ids and drops unrelated models', async 
   assert.deepEqual(result.models, ['meterless/auto', 'meterless/quantum']);
 });
 
+test('the token starts from the environment when nothing is saved', () => {
+  const dir = tempDir();
+
+  const fromApiKey = makeRuntime({
+    dir,
+    token: null,
+    env: { METERLESS_API_KEY: 'rt-from-api-key' },
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.deepEqual(fromApiKey.runtime.resolveToken(), {
+    token: 'rt-from-api-key',
+    source: 'env',
+    envVar: 'METERLESS_API_KEY'
+  });
+  assert.equal(fromApiKey.runtime.getConfig().tokenSource, 'env');
+  assert.equal(fromApiKey.runtime.getConfig().tokenEnvVar, 'METERLESS_API_KEY');
+  assert.equal(fromApiKey.runtime.getConfig().hasToken, true);
+
+  // The runtime's own variable wins over the hosted-endpoint key.
+  const fromRuntimeToken = makeRuntime({
+    dir: tempDir(),
+    token: null,
+    env: { METERLESS_RUNTIME_TOKEN: 'rt-native', METERLESS_API_KEY: 'rt-hosted' },
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.deepEqual(fromRuntimeToken.runtime.resolveToken(), {
+    token: 'rt-native',
+    source: 'env',
+    envVar: 'METERLESS_RUNTIME_TOKEN'
+  });
+
+  // A token saved from the UI still wins over the environment.
+  const saved = makeRuntime({
+    token: 'rt-saved',
+    env: { METERLESS_API_KEY: 'rt-from-api-key' },
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.deepEqual(saved.runtime.resolveToken(), { token: 'rt-saved', source: 'settings' });
+
+  // The placeholder in the environment is ignored, like everywhere else.
+  const placeholder = makeRuntime({
+    dir: tempDir(),
+    token: null,
+    env: { METERLESS_API_KEY: 'rt-local' },
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.deepEqual(placeholder.runtime.resolveToken(), { token: null, source: 'none' });
+});
+
 test('rt-local is rejected; proxy-token is discovered; settings token wins', () => {
   const dir = tempDir();
   const store = new SettingsStore(path.join(dir, 'settings.json'));
@@ -268,6 +318,8 @@ test('rt-local is rejected; proxy-token is discovered; settings token wins', () 
     settings: store,
     stateDir: dir,
     appId: 'test-app',
+    // An empty env keeps the machine's own METERLESS_* variables out of the test.
+    env: {},
     fetchImpl: async () => jsonResponse(401, {})
   });
 

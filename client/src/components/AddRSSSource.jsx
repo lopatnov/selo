@@ -18,7 +18,7 @@ function AddRSSSource() {
 
     try {
       await axios.post(`${API_BASE}/rss-sources`, { name, url });
-      navigate('/feed');
+      navigate('/sources');
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to add RSS source');
     } finally {
@@ -61,7 +61,7 @@ function AddRSSSource() {
           <button type="submit" className="btn btn-primary" disabled={loading}>
             {loading ? 'Adding...' : 'Add RSS Source'}
           </button>
-          <button type="button" className="btn btn-secondary" onClick={() => navigate('/feed')}>
+          <button type="button" className="btn btn-secondary" onClick={() => navigate('/sources')}>
             Cancel
           </button>
         </div>

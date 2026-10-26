@@ -18,9 +18,11 @@ AI Personalities:
 Technologies:
 - Frontend: React 18, React Router, Axios
 - Backend: Node.js, Express, WebSocket
-- Database: Zetaris (with in-memory fallback)
-- AI: Meterless API
+- Storage: server memory; Zetaris is queried over its REST SQL API
+- AI: Meterless Runtime provider + hosted Meterless API
 - Containerization: Docker, Docker Compose
+
+Pages: News Feed, Users, AI Provider — no login, no accounts.
 
 Current Status:
 - Project structure complete

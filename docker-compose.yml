@@ -222,18 +222,30 @@ services:
       api:
         condition: service_healthy
     environment:
-      # Zetaris connection (internal Docker network)
-      ZETARIS_URL: http://api:8888
+      # Zetaris: the app talks to the Zetaris Lightning REST API over SQL
+      # (POST /api/v1.0/sql-editor/sqls/run). Inside this compose network the
+      # bundled platform is reachable as http://api:8888 (the host's 8888 is
+      # bound to 127.0.0.1 and is NOT reachable from a container).
+      # ZETARIS_API_KEY / ZETARIS_ORG_ID must belong to THAT instance: create a
+      # key in its GUI (http://localhost:${UI_PORT:-3010}) and set the numeric
+      # organisation id. SERVER_ZETARIS_URL overrides the target if needed.
+      ZETARIS_URL: ${SERVER_ZETARIS_URL:-http://api:8888}
       ZETARIS_API_KEY: ${ZETARIS_API_KEY:-}
+      ZETARIS_ORG_ID: ${ZETARIS_ORG_ID:-1}
 
-      # Meterless AI (hosted endpoint for non meterless/* model ids)
+      # Meterless AI (hosted endpoint for non meterless/* model ids). The same
+      # METERLESS_API_KEY is the Meterless Runtime token, so the runtime provider
+      # starts configured. METERLESS_RUNTIME_TOKEN overrides it when it differs.
       METERLESS_API_URL: ${METERLESS_API_URL:-https://api.meterless.ai/v1}
       METERLESS_API_KEY: ${METERLESS_API_KEY:-}
 
-      # Meterless Runtime provider
+      # Meterless Runtime provider. A runtime bound to 127.0.0.1 on the host is
+      # NOT reachable from here: point METERLESS_BASE_URL at an address the
+      # container can reach (or paste a connect link in the AI Provider page).
       METERLESS_APP_ID: ${METERLESS_APP_ID:-ai-news-discussion}
       METERLESS_STATE_DIR: ${METERLESS_STATE_DIR:-/home/node/.meterless}
       METERLESS_BASE_URL: ${METERLESS_BASE_URL:-}
+      METERLESS_RUNTIME_TOKEN: ${METERLESS_RUNTIME_TOKEN:-}
 
       # Server config
       PORT: 3001
