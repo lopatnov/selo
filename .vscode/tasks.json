@@ -1,0 +1,148 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "npm: install all",
+      "detail": "Install server and client dependencies",
+      "type": "shell",
+      "command": "npm run install-all",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: server (background)",
+      "detail": "Express API with nodemon on http://localhost:3001",
+      "type": "shell",
+      "command": "npm run server",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "dev: client (background)",
+      "detail": "Create React App dev server on http://localhost:3002",
+      "type": "shell",
+      "command": "npm --prefix client start",
+      "options": {
+        "cwd": "${workspaceFolder}",
+        "env": { "BROWSER": "none" }
+      },
+      "isBackground": true,
+      "problemMatcher": [
+        {
+          "pattern": [{ "regexp": "(?!)" }],
+          "background": {
+            "activeOnStart": true,
+            "beginsPattern": "Starting the development server",
+            "endsPattern": "Compiled successfully|compiled successfully|Compiled with warnings|webpack compiled"
+          }
+        }
+      ],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "dev: full stack (background)",
+      "detail": "Start the API and the CRA dev server together",
+      "dependsOn": ["dev: server (background)", "dev: client (background)"],
+      "dependsOrder": "parallel",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "test: unit",
+      "detail": "node:test suites for the provider, Zetaris client and state store",
+      "type": "shell",
+      "command": "npm test",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "test: smoke",
+      "detail": "Boot the API on a free port and exercise the no-login flow",
+      "type": "shell",
+      "command": "npm run smoke",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test: verify provider",
+      "detail": "Mock runtime checks plus a live probe of 127.0.0.1:8088",
+      "type": "shell",
+      "command": "npm run verify:provider",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test: check connections",
+      "detail": "Live Meterless Runtime and Zetaris probes using the real modules",
+      "type": "shell",
+      "command": "npm run check:connections",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "test: e2e (Playwright)",
+      "detail": "Playwright suite in tests/ against http://localhost:3002",
+      "type": "shell",
+      "command": "npm --prefix tests test",
+      "options": { "cwd": "${workspaceFolder}" },
+      "group": "test",
+      "problemMatcher": []
+    },
+    {
+      "label": "e2e: install Playwright",
+      "detail": "Install Playwright packages and browsers",
+      "type": "shell",
+      "command": "npm --prefix tests install",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "e2e: install browsers",
+      "detail": "Download the Playwright browser binaries",
+      "type": "shell",
+      "command": "npm --prefix tests run install-browsers",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "docker: up (build)",
+      "detail": "Build and start Zetaris plus the app",
+      "type": "shell",
+      "command": "docker compose up --build -d",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "docker: ps",
+      "detail": "Show container and health status",
+      "type": "shell",
+      "command": "docker compose ps --all",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "docker: logs (app)",
+      "detail": "Follow the app server and client logs",
+      "type": "shell",
+      "command": "docker compose logs -f server client",
+      "options": { "cwd": "${workspaceFolder}" },
+      "isBackground": true,
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "docker: down",
+      "detail": "Stop containers and keep named volumes",
+      "type": "shell",
+      "command": "docker compose down",
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    }
+  ]
+}

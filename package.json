@@ -10,7 +10,9 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev:debug": "concurrently \"npm run server:debug\" \"npm run client\"",
     "server": "nodemon server/index.js",
+    "server:debug": "nodemon --inspect=9229 server/index.js",
     "client": "npm --prefix client start",
     "build": "npm --prefix client run build",
     "test": "node --test server/providers/meterless-runtime.test.js server/zetaris.test.js server/state-store.test.js",

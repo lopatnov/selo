@@ -1,0 +1,127 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Server: Node (launch)",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/server/index.js",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "sourceMaps": true,
+      "skipFiles": ["<node_internals>/**"],
+      "env": {
+        "NODE_ENV": "development",
+        "PORT": "3001"
+      }
+    },
+    {
+      "name": "Server: Attach (:9229)",
+      "type": "node",
+      "request": "attach",
+      "port": 9229,
+      "restart": true,
+      "sourceMaps": true,
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Client: Chrome (localhost:3002)",
+      "type": "chrome",
+      "request": "launch",
+      "url": "http://localhost:3002",
+      "webRoot": "${workspaceFolder}/client/src",
+      "sourceMaps": true,
+      "preLaunchTask": "dev: client (background)"
+    },
+    {
+      "name": "Test: state store",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/server/state-store.test.js",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Test: Zetaris client",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/server/zetaris.test.js",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Test: Meterless Runtime provider",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/server/providers/meterless-runtime.test.js",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Test: current file",
+      "type": "node",
+      "request": "launch",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Script: smoke test",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/smoke-test.cjs",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"],
+      "env": {
+        "SMOKE_PORT": "3155"
+      }
+    },
+    {
+      "name": "Script: check connections",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/check-connections.cjs",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Script: verify Meterless provider",
+      "type": "node",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/verify-meterless-provider.cjs",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "neverOpen",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full stack: Server + Chrome",
+      "configurations": ["Server: Node (launch)", "Client: Chrome (localhost:3002)"],
+      "stopAll": true
+    },
+    {
+      "name": "Unit tests: all",
+      "configurations": [
+        "Test: state store",
+        "Test: Zetaris client",
+        "Test: Meterless Runtime provider"
+      ],
+      "stopAll": true
+    }
+  ]
+}
