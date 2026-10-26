@@ -153,3 +153,5 @@ vite.config.ts.timestamp-*
 
 # Claude AI context files (local only)
 docs/claude/
+
+.reference
