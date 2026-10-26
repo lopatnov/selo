@@ -258,10 +258,11 @@ After Zetaris is running:
 
 1. Our application (nginx + built React bundle) runs on <http://localhost:3002>
 2. Zetaris UI is published on `UI_PORT` (`3010` in `.env`, so it does not clash with a standalone `zetaris-platform` stack on 3000)
-3. Zetaris API is published on `API_PORT` (`8898`; the server container still reaches it as `http://api:8888`)
+3. Zetaris API is published on `API_PORT` (`14098` in `.env`; the server container still reaches it as `http://api:8888`).
+   Ports `8888/8889/8898/8899` are **inside the Windows reserved TCP range 8871-9070** and cannot be published on this host - see [Our App Can't Connect to Zetaris](#4-our-app-cant-connect-to-zetaris)
 4. Configure our application's `.env` with:
-   - `ZETARIS_URL`: `http://host.docker.internal:8888` (from inside Docker)
-   - `ZETARIS_API_KEY`: API key created in Zetaris GUI
+   - `SERVER_ZETARIS_URL`: `http://api:8888` (default for the bundled stack)
+   - `ZETARIS_API_KEY`: API key created in Zetaris GUI, or `ZETARIS_USERNAME` + `ZETARIS_PASSWORD`
    - `METERLESS_API_URL`: `https://api.meterless.ai/v1`
    - `METERLESS_API_KEY`: Your Meterless API key
 
@@ -486,12 +487,12 @@ Consequences:
 
 ### What is stored where
 
-| Data                                       | Location                                                    | Survives a restart?                             |
-| ------------------------------------------ | ----------------------------------------------------------- | ----------------------------------------------- |
-| Meterless base URL and saved runtime token | `server/data/settings.json` (or `SELO_SETTINGS_FILE`)       | Yes; atomic write, chmod `0600` where supported |
-| Meterless models and status                | Page state only; fetched again on every load                | No                                              |
-| Zetaris credentials                        | `.env` (`ZETARIS_API_KEY`, `ZETARIS_ORG_ID`, `ZETARIS_URL`) | Yes                                             |
-| RSS sources, users, news, comments         | `server/data/state.json` (or `SELO_STATE_FILE`)             | Yes                                             |
+| Data                                       | Location                                                                                                                     | Survives a restart?                             |
+| ------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Meterless base URL and saved runtime token | `server/data/settings.json` (or `SELO_SETTINGS_FILE`)                                                                        | Yes; atomic write, chmod `0600` where supported |
+| Meterless models and status                | Page state only; fetched again on every load                                                                                 | No                                              |
+| Zetaris credentials                        | `.env` (`ZETARIS_API_KEY`, `ZETARIS_ORG_ID`, `ZETARIS_REST_URL`, `ZETARIS_BASE_URL`, `ZETARIS_USERNAME`, `ZETARIS_PASSWORD`) | Yes                                             |
+| RSS sources, users, news, comments         | `server/data/state.json` (or `SELO_STATE_FILE`)                                                                              | Yes                                             |
 
 In Docker, `server/data` is the named volume `server-data` mounted at
 `/app/server/data`, so a save from the AI Provider page survives container
@@ -514,23 +515,45 @@ or paste a connect link in the AI Provider page; for host runs the default
 
 ### Zetaris configuration
 
+Four values decide whether Zetaris works. They come from the Zetaris GUI
+(**Management -> Organisation** shows the numeric **ID**):
+
 ```bash
+ZETARIS_ORG_ID=806                 # NUMERIC organisation id (never the org name)
 ZETARIS_API_KEY=<key created in the Zetaris GUI>
-ZETARIS_ORG_ID=806                 # NUMERIC organisation id that owns the key
-# ZETARIS_URL=127.0.0.1:8888       # optional; default for host runs
+ZETARIS_USERNAME=<your Zetaris login>
+ZETARIS_PASSWORD=<your Zetaris password>
+
+# Where the REST SQL API actually listens:
+ZETARIS_REST_URL=http://127.0.0.1:14088/api/v1.0
+# Web UI origin, only used for /api/auth/login:
+ZETARIS_BASE_URL=http://localhost:3000
+# Optional, sent as User-Agent (quotes from .env are stripped):
+ZETARIS_USER_AGENT="selo dev@example.com"
 ```
 
+`ZETARIS_API_KEY` is used as the bearer when set. Without it the client logs in
+at `POST <ZETARIS_BASE_URL>/api/auth/login` with `ZETARIS_USERNAME` /
+`ZETARIS_PASSWORD`, caches the returned ID token until its `exp`, and refreshes
+it once when the API answers 401/403. Provider keys (`ZETARIS_*`,
+`METERLESS_*`) are loaded from `.env` with priority over the OS environment
+(see [`server/load-env.js`](server/load-env.js:1)), so **a Windows user-level
+`ZETARIS_*` variable cannot silently shadow them** - which is what made earlier
+runs talk to the wrong port. `PORT` and the `SELO_*` paths keep plain dotenv
+semantics, so a harness can still inject them.
+
 The app talks to `POST <rest url>/sql-editor/sqls/run` with
-`Authorization: Bearer <key>`, `X-Org-ID: <numeric id>` and a fresh
+`Authorization: Bearer <key or ID token>`, `X-Org-ID: <numeric id>` and a fresh
 `X-Request-ID`. Two mistakes produce an HTTP 400 instead of a clear message, and
 both are handled explicitly:
 
-| Answer                       | Meaning                                           |
-| ---------------------------- | ------------------------------------------------- |
-| `400 {"msg":"Not Allowed"}`  | `ZETARIS_ORG_ID` is not the id that owns the key  |
-| `400 Invalid value for: ...` | `ZETARIS_ORG_ID` is not numeric (a name was used) |
-| `401`                        | the key is missing or revoked                     |
-| `200 {"data":[["1"]]}`       | `SELECT 1` works, so the provider is **online**   |
+| Answer                        | Meaning                                             |
+| ----------------------------- | --------------------------------------------------- |
+| `400 {"msg":"Not Allowed"}`   | `ZETARIS_ORG_ID` is not the id behind the token     |
+| `400 Invalid value for: ...`  | `ZETARIS_ORG_ID` is not numeric (a name was used)   |
+| `400 Query id already exists` | `queryId` reused; the client sends a fresh UUID     |
+| `401`                         | the key/credentials are missing, revoked or expired |
+| `200 {"data":[["1"]]}`        | `SELECT 1` works, so the provider is **online**     |
 
 The AI Provider page shows the Zetaris state and lets you run one read-only
 statement; `POST /api/zetaris/query` refuses anything that is not a single
@@ -648,7 +671,7 @@ first use (`GET /api/participant`), so nothing has to be signed in.
 
 # 2. Configure our application .env:
 #    From the project root (C:\projects\selo):
-#    - ZETARIS_URL: http://host.docker.internal:8888
+#    - SERVER_ZETARIS_URL: http://api:8888   (the bundled platform, in-network)
 #    - ZETARIS_API_KEY: <key created in THAT stack's Zetaris GUI at :3010>
 #    - ZETARIS_ORG_ID: <numeric organisation id that owns the key>
 #    - METERLESS_API_URL: https://api.meterless.ai/v1
@@ -660,7 +683,7 @@ docker compose up --build -d
 # 3. Access:
 #    - Our Application: http://localhost:3002
 #    - Zetaris UI: http://localhost:3010  (UI_PORT in .env)
-#    - Zetaris API: http://localhost:8898 (API_PORT in .env)
+#    - Zetaris API: http://localhost:14098 (API_PORT in .env)
 
 # 4. First-time Application Setup (no login anywhere):
 #    1. Open http://localhost:3002 → News Feed
@@ -682,8 +705,10 @@ npm start
 # Terminal 2: Client (CRA dev server, port 3000 by default)
 npm --prefix client start
 
-# Collections live in the server process; Meterless Runtime on
-# 127.0.0.1:8088 and Zetaris on 127.0.0.1:8888 are reachable as-is.
+# Collections live in the server process. Meterless Runtime on 127.0.0.1:8088
+# and the Zetaris REST API are reachable as-is - the REST port is whatever
+# ZETARIS_REST_URL says (14088 for the standalone stack on this host, because
+# Windows reserves 8871-9070 and 8888 cannot be published).
 npm run check:connections   # both probes, using the real modules
 npm run smoke               # boots the API and checks the no-login flow
 ````
@@ -813,7 +838,7 @@ docker compose exec server curl -fsS http://127.0.0.1:3001/health
 
 For step debugging, run the Node process on the host
 (`npm run server:debug`) and point it at the Dockerised Zetaris API
-(`ZETARIS_URL=http://127.0.0.1:8898`, the published `API_PORT`). The runtime
+(`ZETARIS_REST_URL=http://127.0.0.1:14098/api/v1.0`, the published `API_PORT`). The runtime
 caveat stays the same: a Meterless Runtime bound to `127.0.0.1` on the host is
 not reachable from inside a container.
 
@@ -982,17 +1007,60 @@ docker compose logs driver
 
 ```bash
 docker compose logs ui
-# Check if API is healthy
-curl http://host.docker.internal:8888/
+# Check if API is healthy (inside the compose network)
+docker compose exec ui wget -q -O - http://api:8888/ | head
 ```
 
 #### 4. Our App Can't Connect to Zetaris
 
+Read the status first - it names the cause:
+
 ```bash
-# From inside our server container
-docker compose exec server curl http://host.docker.internal:8888/
-docker compose logs server
+npm run check:connections     # prints rest url, org id, auth mode, then SELECT 1
+# or: curl http://localhost:3001/api/zetaris
 ```
+
+**Windows reserves TCP ports and Docker cannot publish them.** The classic
+symptom is a `docker ps` mapping such as `127.0.0.1:8888->8888/tcp` with
+nothing listening on the host (`curl` says "Failed to connect"):
+
+```powershell
+netsh interface ipv4 show excludedportrange protocol=tcp
+#   8871  8970      <- 8888, 8889, 8898, 8899 all live here
+```
+
+Verify a port can even be bound, then publish the API on a free one:
+
+```powershell
+Test-NetConnection 127.0.0.1 -Port 14088   # False => usable by Docker
+```
+
+```bash
+# zetaris-platform/.env (the stack that owns the credentials)
+API_PORT=14088
+API_INTERNAL_PORT=14089
+# then recreate the API container so the mapping changes
+docker compose up -d api
+```
+
+```bash
+# our .env
+ZETARIS_REST_URL=http://127.0.0.1:14088/api/v1.0
+```
+
+**`.env` was being shadowed.** A Windows user-level variable (set for another
+Zetaris project, e.g. `ZETARIS_REST_URL=http://localhost:8888/api/v1.0`) wins
+over `.env` in a plain `dotenv.config()`. The server now loads `.env` with
+`override: true`; `check:connections` lists both the overridden keys
+("`.env wins over the OS environment for: ...`") and the inherited-only ones.
+
+| Symptom                                                         | Cause                                                                                    |
+| --------------------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `Could not reach Zetaris ... Nothing is listening on that port` | the published port is reserved by Windows, or the stack is down                          |
+| `401` / `Zetaris refused the bearer token`                      | key revoked or expired; the login fallback needs `ZETARIS_USERNAME` + `ZETARIS_PASSWORD` |
+| `400 Not Allowed`                                               | `ZETARIS_ORG_ID` is not the id behind that token                                         |
+| `400 Query id already exists`                                   | a `queryId` was replayed; every request must use a fresh UUID                            |
+| `unauthorized` after a successful login                         | the account's org id differs from `ZETARIS_ORG_ID`                                       |
 
 #### 5. Data Not Persisting
 

@@ -4,7 +4,9 @@ const Parser = require('rss-parser');
 const { randomUUID } = require('node:crypto');
 const WebSocket = require('ws');
 const http = require('node:http');
-require('dotenv').config();
+// Provider credentials follow .env even when a Windows user-level variable
+// exists; everything else keeps plain dotenv semantics (see server/load-env.js).
+require('./load-env').loadEnv();
 
 const { meterlessCloud, meterlessRuntime, providers } = require('./providers');
 const { createProvidersRouter } = require('./providers/routes');

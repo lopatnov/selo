@@ -276,6 +276,14 @@ function ProviderSettings() {
   const unauthorized = statusKind === 'unauthorized';
   const tokenSource = config?.tokenSource || 'none';
   const zetarisStatus = zetaris?.status?.status || 'checking';
+  const zetarisAuth =
+    zetaris == null
+      ? '…'
+      : zetaris.hasKey
+        ? 'API key (ZETARIS_API_KEY)'
+        : zetaris.hasPassword
+          ? 'login (ZETARIS_USERNAME + ZETARIS_PASSWORD)'
+          : 'not configured';
 
   return (
     <div>
@@ -604,16 +612,28 @@ function ProviderSettings() {
           </div>
         </div>
         <p className="provider-note">
-          Read from <code>ZETARIS_API_KEY</code>, <code>ZETARIS_ORG_ID</code> and{' '}
-          <code>ZETARIS_URL</code> in <code>.env</code>. The status is honest:{' '}
+          Read from <code>ZETARIS_ORG_ID</code>, <code>ZETARIS_API_KEY</code> (or{' '}
+          <code>ZETARIS_USERNAME</code> + <code>ZETARIS_PASSWORD</code>) and{' '}
+          <code>ZETARIS_REST_URL</code> in <code>.env</code>. The status is honest:{' '}
           <code>SELECT 1</code> must come back with <code>1</code> through{' '}
           <code>POST /sql-editor/sqls/run</code>.
         </p>
 
         {zetaris?.status?.status === 'unauthorized' && (
           <div className="provider-alert warning">
-            Zetaris refused the key. <code>X-Org-ID</code> must be the numeric organisation id
-            that owns <code>ZETARIS_API_KEY</code>, not the organisation name.
+            Zetaris refused the credentials. <code>X-Org-ID</code> must be the numeric
+            organisation id behind that token, not the organisation name; without an API key the
+            client logs in with <code>ZETARIS_USERNAME</code> and <code>ZETARIS_PASSWORD</code>.
+          </div>
+        )}
+
+        {zetaris?.status?.status === 'offline' && /reserved|Nothing is listening/i.test(
+          zetaris?.status?.reason || ''
+        ) && (
+          <div className="provider-alert warning">
+            The REST port is not reachable. On Windows the TCP range 8871-9070 is reserved, so a
+            Docker mapping for 8888 never listens; publish the API on a free port (for example
+            14088) and point <code>ZETARIS_REST_URL</code> at it.
           </div>
         )}
 
@@ -635,8 +655,12 @@ function ProviderSettings() {
             <dd><code>{zetaris?.orgId || '…'}</code></dd>
           </div>
           <div>
-            <dt>API key</dt>
-            <dd>{zetaris?.hasKey ? 'set in .env' : 'MISSING — set ZETARIS_API_KEY'}</dd>
+            <dt>Web UI</dt>
+            <dd><code>{zetaris?.uiUrl || '…'}</code></dd>
+          </div>
+          <div>
+            <dt>Auth</dt>
+            <dd>{zetarisAuth}</dd>
           </div>
         </dl>
 

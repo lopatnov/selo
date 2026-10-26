@@ -3,7 +3,14 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { ZetarisError, createZetaris, resolveRestUrl } = require('./zetaris');
+const {
+  DEFAULT_UI_URL,
+  ZetarisError,
+  createZetaris,
+  resolveRestUrl,
+  resolveUiUrl,
+  tokenExpiryMs
+} = require('./zetaris');
 
 function jsonResponse(status, body) {
   return {
@@ -153,4 +160,129 @@ test('unreachable Zetaris is offline, and listDatabases uses SHOW LIGHTNING DATA
 
   assert.deepEqual(await client.listDatabases(), ['barthelona_files', 'POKEAPI_REST']);
   assert.equal(sql, 'SHOW LIGHTNING DATABASES');
+});
+
+test('resolveUiUrl keeps only the origin of ZETARIS_BASE_URL', () => {
+  assert.equal(
+    resolveUiUrl({ ZETARIS_BASE_URL: 'http://localhost:3000/api/v1.0' }),
+    'http://localhost:3000'
+  );
+  assert.equal(resolveUiUrl({ ZETARIS_BASE_URL: 'localhost:3000/' }), 'http://localhost:3000');
+  assert.equal(resolveUiUrl({}), DEFAULT_UI_URL);
+});
+
+test('without an API key the client logs in through the UI and reuses the token', async () => {
+  const calls = [];
+  const client = createZetaris({
+    env: {
+      ZETARIS_ORG_ID: '806',
+      ZETARIS_USERNAME: 'someone@example.com',
+      ZETARIS_PASSWORD: 'secret'
+    },
+    fetchImpl: async (url, init) => {
+      calls.push({ url, init });
+      if (url.endsWith('/api/auth/login')) {
+        return jsonResponse(200, { idToken: 'header.payload.signature' });
+      }
+      return jsonResponse(200, { headers: ['one'], data: [['1']], total: 1 });
+    },
+    restUrl: 'http://zetaris.test/api/v1.0',
+    uiUrl: 'http://localhost:3000'
+  });
+
+  const config = client.getConfig();
+  assert.equal(config.authMode, 'login');
+  assert.equal(config.hasKey, false);
+  assert.equal(config.hasPassword, true);
+  assert.equal(config.keySource, 'login');
+  assert.equal(config.uiUrl, 'http://localhost:3000');
+
+  await client.runSql('SELECT 1');
+  await client.runSql('SELECT 1');
+
+  const logins = calls.filter(call => call.url.endsWith('/api/auth/login'));
+  assert.equal(logins.length, 1, 'the token is cached, not re-requested');
+  assert.equal(logins[0].init.method, 'POST');
+  assert.deepEqual(JSON.parse(logins[0].init.body), {
+    username: 'someone@example.com',
+    password: 'secret'
+  });
+
+  const queries = calls.filter(call => call.url.endsWith('/sql-editor/sqls/run'));
+  assert.equal(queries.length, 2);
+  assert.equal(queries[0].init.headers.Authorization, 'Bearer header.payload.signature');
+  assert.equal(queries[0].init.headers['X-Org-ID'], '806');
+});
+
+test('a login token that expired is refreshed once on 401', async () => {
+  let logins = 0;
+  let queries = 0;
+  const client = createZetaris({
+    env: { ZETARIS_ORG_ID: '806', ZETARIS_USERNAME: 'u@example.com', ZETARIS_PASSWORD: 'p' },
+    fetchImpl: async url => {
+      if (url.endsWith('/api/auth/login')) {
+        logins += 1;
+        return jsonResponse(200, { idToken: `token-${logins}` });
+      }
+      queries += 1;
+      return queries === 1
+        ? jsonResponse(401, { msg: 'expired' })
+        : jsonResponse(200, { headers: ['one'], data: [['1']], total: 1 });
+    },
+    restUrl: 'http://zetaris.test/api/v1.0',
+    uiUrl: 'http://localhost:3000'
+  });
+
+  const result = await client.runSql('SELECT 1');
+  assert.deepEqual(result.rows, [['1']]);
+  assert.equal(logins, 2, 'one login, then one refresh');
+  assert.equal(queries, 2, 'the query is retried exactly once');
+});
+
+test('a rejected login is unauthorized, not offline', async () => {
+  const client = createZetaris({
+    env: { ZETARIS_ORG_ID: '806', ZETARIS_USERNAME: 'u@example.com', ZETARIS_PASSWORD: 'wrong' },
+    fetchImpl: async () => jsonResponse(401, { msg: 'bad credentials' }),
+    restUrl: 'http://zetaris.test/api/v1.0',
+    uiUrl: 'http://localhost:3000'
+  });
+
+  const result = await client.probe();
+  assert.equal(result.status, 'unauthorized');
+  assert.match(result.reason, /ZETARIS_USERNAME/);
+});
+
+test('no key and no credentials says so, and mentions both options', async () => {
+  const client = makeClient({ env: { ZETARIS_ORG_ID: '806' } });
+  const result = await client.probe();
+  assert.equal(result.status, 'unconfigured');
+  assert.match(result.reason, /ZETARIS_API_KEY/);
+  assert.match(result.reason, /ZETARIS_USERNAME/);
+});
+
+test('ZETARIS_USER_AGENT is sent without its .env quotes', async () => {
+  let headers;
+  const client = createZetaris({
+    env: {
+      ZETARIS_API_KEY: 'key-123',
+      ZETARIS_ORG_ID: '806',
+      ZETARIS_USER_AGENT: '"selo dev@example.com"'
+    },
+    fetchImpl: async (url, init) => {
+      headers = init.headers;
+      return jsonResponse(200, { headers: ['one'], data: [['1']], total: 1 });
+    },
+    restUrl: 'http://zetaris.test/api/v1.0'
+  });
+
+  assert.equal(client.getConfig().userAgent, 'selo dev@example.com');
+  await client.runSql('SELECT 1');
+  assert.equal(headers['User-Agent'], 'selo dev@example.com');
+});
+
+test('tokenExpiryMs reads exp from a JWT and ignores opaque tokens', () => {
+  const payload = Buffer.from(JSON.stringify({ exp: 1_700_000_000 })).toString('base64url');
+  assert.equal(tokenExpiryMs(`header.${payload}.signature`), 1_700_000_000_000);
+  assert.equal(tokenExpiryMs('opaque-token'), null);
+  assert.equal(tokenExpiryMs('not-base64.not-json'), null);
 });
