@@ -11,17 +11,30 @@
  *    every time a discussion starts, so different news items get different
  *    voices. 1..5, default 1 (one voice per article).
  *
+ *  - `parallelLanes` — how many of the assigned personalities may speak at the
+ *    same time. 1 keeps the classic turn-by-turn discussion; 2..5 lets several
+ *    lanes post concurrently (multi-lane orchestration). 1..5, default 1.
+ *
+ *  - `pipeline` — the discussion stages, run in order (multi-lane pipeline):
+ *       `analyze`    fan-out: every assigned personality posts its opening
+ *                    reaction to the news in parallel;
+ *       `discuss`    the parallel conversation itself (per-lane pacing/limits);
+ *       `summarize`  fan-in: one personality writes the closing summary.
+ *
  * The values are stored flat in the JSON state file, so no migration is
  * needed: a state file written before this setting existed simply falls back
  * to the defaults.
  */
 
 const DEFAULT_APP_SETTINGS = Object.freeze({
-  agentsPerNews: 1
+  agentsPerNews: 1,
+  parallelLanes: 1,
+  pipeline: Object.freeze({ analyze: true, discuss: true, summarize: false })
 });
 
 const APP_SETTINGS_LIMITS = Object.freeze({
-  agentsPerNews: Object.freeze({ min: 1, max: 5 })
+  agentsPerNews: Object.freeze({ min: 1, max: 5 }),
+  parallelLanes: Object.freeze({ min: 1, max: 5 })
 });
 
 function toInteger(value, fallback) {
@@ -37,6 +50,31 @@ function clamp(value, { min, max }) {
   return Math.min(max, Math.max(min, value));
 }
 
+function toBoolean(value, fallback) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase();
+    if (['true', '1', 'yes', 'on'].includes(normalized)) return true;
+    if (['false', '0', 'no', 'off', ''].includes(normalized)) return false;
+  }
+  return fallback;
+}
+
+/**
+ * Normalise the discussion pipeline. Missing phases fall back to their
+ * defaults, so a partial `PUT { pipeline: { summarize: true } }` never drops
+ * the other two phases.
+ */
+function normalizePipeline(raw = {}) {
+  const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  return {
+    analyze: toBoolean(source.analyze, DEFAULT_APP_SETTINGS.pipeline.analyze),
+    discuss: toBoolean(source.discuss, DEFAULT_APP_SETTINGS.pipeline.discuss),
+    summarize: toBoolean(source.summarize, DEFAULT_APP_SETTINGS.pipeline.summarize)
+  };
+}
+
 /**
  * Turn any raw object (a saved state file or a PUT body) into a complete,
  * valid set of global settings. Unknown keys are dropped and out-of-range
@@ -45,16 +83,28 @@ function clamp(value, { min, max }) {
 function normalizeAppSettings(raw = {}) {
   const source = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
 
+  const agentsPerNews = clamp(
+    toInteger(source.agentsPerNews, DEFAULT_APP_SETTINGS.agentsPerNews),
+    APP_SETTINGS_LIMITS.agentsPerNews
+  );
+  const parallelLanes = clamp(
+    toInteger(source.parallelLanes, DEFAULT_APP_SETTINGS.parallelLanes),
+    APP_SETTINGS_LIMITS.parallelLanes
+  );
+
   return {
-    agentsPerNews: clamp(
-      toInteger(source.agentsPerNews, DEFAULT_APP_SETTINGS.agentsPerNews),
-      APP_SETTINGS_LIMITS.agentsPerNews
-    )
+    // Every lane needs a personality to fill it, so asking for more lanes than
+    // agents silently raises the roster. Raising `parallelLanes` in the UI must
+    // actually produce more speaking lanes, not just a higher (unused) cap.
+    agentsPerNews: Math.max(agentsPerNews, parallelLanes),
+    parallelLanes,
+    pipeline: normalizePipeline(source.pipeline)
   };
 }
 
 module.exports = {
   APP_SETTINGS_LIMITS,
   DEFAULT_APP_SETTINGS,
-  normalizeAppSettings
+  normalizeAppSettings,
+  normalizePipeline
 };

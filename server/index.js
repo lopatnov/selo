@@ -18,7 +18,8 @@ const { createMeterlessLog, defaultLogFile } = require('./meterless-log');
 const { createActivityTracker } = require('./activity');
 const {
   APP_SETTINGS_LIMITS,
-  normalizeAppSettings
+  normalizeAppSettings,
+  normalizePipeline
 } = require('./app-settings');
 const {
   canPostMessage,
@@ -466,6 +467,49 @@ const DISCUSSION_IDLE_RECHECK_MS = 5000;
 const DISCUSSION_FAILURE_COOLDOWN_MS = 15000;
 const DISCUSSION_MAX_COOLDOWN_MS = 120000;
 
+// Multi-lane pipeline: a discussion runs these phases in order, and each phase
+// maps to a lane role used by the live activity badges.
+const LANE_ROLES = Object.freeze({
+  ANALYST: 'analyst',
+  DEBATER: 'debater',
+  SUMMARIZER: 'summarizer'
+});
+
+// Global cap on concurrent model calls across every active discussion, so
+// several parallel lanes multiplied by several news items can never overload
+// the runtime or the token bill.
+const DEFAULT_MAX_CONCURRENT_TURNS = Number.parseInt(
+  process.env.SELO_MAX_CONCURRENT_TURNS,
+  10
+) || 8;
+
+/**
+ * A tiny counting semaphore. `acquire()` resolves when a slot is free;
+ * `release()` hands the slot to the next waiter or returns it to the pool.
+ */
+function createSemaphore(limit) {
+  const size = Math.max(1, Number.isFinite(limit) ? limit : 1);
+  let active = 0;
+  const queue = [];
+  async function acquire() {
+    if (active < size) {
+      active += 1;
+      return;
+    }
+    await new Promise(resolve => queue.push(resolve));
+  }
+  function release() {
+    if (queue.length > 0) {
+      queue.shift()();
+      return;
+    }
+    active -= 1;
+  }
+  return { acquire, release };
+}
+
+const turnSlots = createSemaphore(DEFAULT_MAX_CONCURRENT_TURNS);
+
 // AI users only: the local human participant (isAI: false, modelName: "human")
 // never posts AI replies.
 function aiParticipants() {
@@ -483,7 +527,7 @@ function commentThread(newsId) {
 // Error notices are not opinions: they never consume the message budget.
 function messageCountFor(newsId, userId) {
   return commentThread(newsId).filter(
-    comment => comment.userId === userId && !comment.isError
+    comment => comment.userId === userId && !comment.isError && !comment.isSummary
   ).length;
 }
 
@@ -495,7 +539,7 @@ function consecutiveCountFor(newsId, userId) {
   let count = 0;
   for (let index = thread.length - 1; index >= 0; index -= 1) {
     const comment = thread[index];
-    if (comment.isError) {
+    if (comment.isError || comment.isSummary) {
       if (comment.userId !== userId) break;
       continue;
     }
@@ -517,34 +561,6 @@ async function waitForDiscussion(newsId, ms) {
 }
 
 /**
- * Pick the next speaker at random among the personalities that may post right
- * now. Random instead of round-robin on purpose: the order of the discussion
- * should not be predictable from the order in which the personalities happen
- * to be stored.
- *
- * `random` is injectable so the choice is testable.
- */
-function pickNextAiUser(newsId, users, cooldowns = new Map(), random = Math.random) {
-  const now = Date.now();
-  const candidates = [];
-
-  for (const user of users) {
-    if ((cooldowns.get(user.id) || 0) > now) continue;
-    const settings = normalizeDiscussionSettings(user);
-    const { allowed } = canPostMessage({
-      messageCount: messageCountFor(newsId, user.id),
-      consecutiveCount: consecutiveCountFor(newsId, user.id),
-      settings
-    });
-    if (allowed) candidates.push({ user, settings });
-  }
-
-  if (candidates.length === 0) return null;
-  const index = Math.min(candidates.length - 1, Math.floor(random() * candidates.length));
-  return candidates[index];
-}
-
-/**
  * Draw the personalities that will discuss this news item. A news item is
  * "seen" by at most `agentsPerNews` (1..5, default 1) personalities; they are
  * sampled at random, and only from the ones that can still post.
@@ -559,11 +575,93 @@ function sampleAiUsers(users, count, random = Math.random) {
   return pool.slice(0, Math.max(0, count));
 }
 
-function allAiAtMessageLimit(newsId, users) {
-  return users.every(user => {
-    const settings = normalizeDiscussionSettings(user);
-    return messageCountFor(newsId, user.id) >= settings.maxMessagesPerNews;
+/** The lane role every agent plays during one pipeline phase. */
+function laneRoleFor(phase) {
+  if (phase === 'analyze') return LANE_ROLES.ANALYST;
+  if (phase === 'summarize') return LANE_ROLES.SUMMARIZER;
+  return LANE_ROLES.DEBATER;
+}
+
+/** Public per-lane snapshot the client renders as a live "lane strip". */
+function discussionLanes(discussion) {
+  const phase = discussion?.phase || 'discuss';
+  return discussionAgents(discussion).map(user => ({
+    id: user.id,
+    name: user.name,
+    model: user.modelName || '',
+    role: laneRoleFor(phase)
+  }));
+}
+
+function setDiscussionPhase(newsId, phase) {
+  const discussion = storage.discussions.get(newsId);
+  if (!discussion?.active) return;
+  discussion.phase = phase;
+  broadcast('discussion_status', {
+    newsId,
+    active: true,
+    phase,
+    lanes: discussionLanes(discussion),
+    agents: discussion.agentModels
   });
+}
+
+/** Run a task holding both the per-discussion lane slot and the global slot. */
+async function withTurnSlot(laneSlots, task) {
+  await laneSlots.acquire();
+  try {
+    await turnSlots.acquire();
+    try {
+      return await task();
+    } finally {
+      turnSlots.release();
+    }
+  } finally {
+    laneSlots.release();
+  }
+}
+
+/**
+ * After every retry failed, turn the error into an in-character apology plus
+ * an increasing cooldown, so one dead model never freezes its lane or the
+ * thread.
+ */
+async function handleLaneFailure(
+  newsId,
+  user,
+  cooldowns,
+  apologized,
+  failuresByUser,
+  result,
+  role
+) {
+  const failure = describeMeterlessFailure(result.error, user.modelName);
+  const strikes = (failuresByUser.get(user.id) || 0) + 1;
+  failuresByUser.set(user.id, strikes);
+  const cooldownMs = Math.min(
+    DISCUSSION_MAX_COOLDOWN_MS,
+    DISCUSSION_FAILURE_COOLDOWN_MS * strikes
+  );
+  cooldowns.set(user.id, Date.now() + cooldownMs);
+
+  broadcastAgentActivity(newsId, user, 'error', {
+    laneRole: role,
+    code: failure.code,
+    message: failure.message
+  });
+
+  if (!apologized.has(user.id)) {
+    apologized.add(user.id);
+    await addComment(newsId, user.id, failure.text, true, {
+      isError: true,
+      logEntryId: result.entry?.id ?? null,
+      error: {
+        code: failure.code,
+        message: failure.message,
+        attempts: failure.attempts
+      }
+    });
+  }
 }
 
 /** The personalities assigned to one discussion (and still existing). */
@@ -700,6 +798,33 @@ function buildDiscussionPrompt(news, user, comments) {
 }
 
 /**
+ * The closing (fan-in) stage prompt: the summarizer reads the whole thread and
+ * writes a short digest instead of another opinion.
+ */
+function buildSummaryPrompt(news, user, comments) {
+  const transcript = buildTranscript(user, comments);
+  const speaker = sanitizeUntrustedInput(user.name) || 'A participant';
+
+  const system = [
+    buildSystemPrompt(user),
+    '- This is the closing stage: write the summary of the whole discussion, not another opinion.'
+  ].join('\n');
+
+  const userPrompt = [
+    'NEWS',
+    `Headline: ${oneLine(sanitizeUntrustedInput(news.title))}`,
+    `Article: ${clipText(sanitizeUntrustedInput(news.content), PROMPT_NEWS_CHARS) || '(no article text)'}`,
+    '',
+    'DISCUSSION SO FAR (oldest to newest)',
+    transcript || 'Nobody has spoken.',
+    '',
+    `As ${speaker}, write the closing summary of this discussion: the main positions, the disagreements and the closest thing to a conclusion. 3-4 sentences.`
+  ].join('\n');
+
+  return { system, user: userPrompt };
+}
+
+/**
  * One WebSocket event per agent turn so the News Feed can show live activity
  * instead of a static "who sees this news item" list:
  *   requesting → 👀  success → ✅  error → ❌
@@ -732,10 +857,15 @@ function finishDiscussion(newsId, reason) {
 }
 
 /**
- * One background runner per news item. Only the personalities assigned to that
- * news item take part (1..5 of them, drawn at random when the discussion
- * starts); the next speaker is chosen at random among those that may post, and
- * every personality keeps its own pacing and limits.
+ * One background runner per news item. It executes the configured pipeline
+ * (analyze → discuss → summarize) with the assigned personalities as parallel
+ * lanes:
+ *
+ *   analyze    fan-out — every assigned personality opens at once, each
+ *              reacting to the news (and to any earlier comments);
+ *   discuss    the parallel conversation — every personality keeps its own
+ *              pacing, limits and cooldown while several lanes post at once;
+ *   summarize  fan-in — one personality writes the closing summary.
  *
  * Runs in the background on purpose: a cold routing mode can take minutes, so
  * the HTTP request must never wait for the first answer.
@@ -744,7 +874,7 @@ async function runDiscussion(newsId, news) {
   const discussion = storage.discussions.get(newsId);
   if (!discussion) return;
 
-  // Per-turn state: who is resting after a failure, who already showed an
+  // Per-lane state: who is resting after a failure, who already showed an
   // error notice (so a dead provider does not spam the thread), and how many
   // times each personality failed in a row.
   const cooldowns = discussion.cooldowns || new Map();
@@ -754,83 +884,186 @@ async function runDiscussion(newsId, news) {
   discussion.apologies = apologized;
   discussion.failuresByUser = failuresByUser;
 
-  while (isDiscussionActive(newsId)) {
+  const settings = currentSettings();
+  const pipeline = normalizePipeline(settings.pipeline);
+  // How many of the assigned personalities may hold a lane at once.
+  const laneSlots = createSemaphore(Math.max(1, settings.parallelLanes));
+
+  // Phase 1 — analyze (fan-out): every assigned personality opens in parallel.
+  if (pipeline.analyze) {
+    setDiscussionPhase(newsId, 'analyze');
+    await Promise.all(
+      discussionAgents(discussion).map(user =>
+        runAnalysisLane(newsId, news, user, cooldowns, apologized, failuresByUser, laneSlots)
+      )
+    );
+    if (!isDiscussionActive(newsId)) return;
+  }
+
+  // Phase 2 — discuss (parallel lanes).
+  if (pipeline.discuss) {
     const users = discussionAgents(discussion);
     if (users.length === 0) {
       finishDiscussion(newsId, 'no_ai_users');
       return;
     }
+    setDiscussionPhase(newsId, 'discuss');
+    await Promise.all(
+      users.map(user =>
+        runDebateLane(newsId, news, user, cooldowns, apologized, failuresByUser, laneSlots)
+      )
+    );
+    if (!isDiscussionActive(newsId)) return;
+  }
 
-    const picked = pickNextAiUser(newsId, users, cooldowns);
-    if (!picked) {
-      if (allAiAtMessageLimit(newsId, users)) {
-        finishDiscussion(newsId, 'max_messages');
-        return;
-      }
-      // Either somebody is waiting for another participant to speak, or every
-      // personality is resting after a provider failure. Keep the discussion
-      // alive and try again shortly; never freeze on one bad request.
+  // Phase 3 — summarize (fan-in).
+  if (pipeline.summarize) {
+    const summarizer = discussionAgents(discussion)[0];
+    if (summarizer) {
+      setDiscussionPhase(newsId, 'summarize');
+      await runSummaryLane(newsId, news, summarizer);
+      if (!isDiscussionActive(newsId)) return;
+    }
+  }
+
+  finishDiscussion(newsId, 'max_messages');
+}
+
+/**
+ * One opening message per personality, posted in parallel (bounded by the lane
+ * slots). The opening reacts to the news itself and to anything already said.
+ */
+async function runAnalysisLane(newsId, news, user, cooldowns, apologized, failuresByUser, laneSlots) {
+  if (!isDiscussionActive(newsId)) return;
+
+  const prompt = buildDiscussionPrompt(news, user, commentThread(newsId));
+  broadcastAgentActivity(newsId, user, 'requesting', { laneRole: LANE_ROLES.ANALYST });
+
+  const result = await withTurnSlot(laneSlots, () =>
+    callMeterlessAI({ newsId, user, prompt: prompt.user, systemPrompt: prompt.system })
+  );
+  if (!isDiscussionActive(newsId)) return;
+
+  if (result.answer && !result.error) {
+    cooldowns.delete(user.id);
+    apologized.delete(user.id);
+    failuresByUser.delete(user.id);
+    const comment = await addComment(newsId, user.id, result.answer, true, {
+      logEntryId: result.entry?.id ?? null
+    });
+    broadcastAgentActivity(newsId, user, 'success', {
+      laneRole: LANE_ROLES.ANALYST,
+      commentId: comment?.id ?? null
+    });
+    return;
+  }
+
+  await handleLaneFailure(newsId, user, cooldowns, apologized, failuresByUser, result, LANE_ROLES.ANALYST);
+}
+
+/**
+ * The ongoing conversation lane of one personality. It loops independently of
+ * the other lanes: pace itself, respect its own limits, and acquire a lane
+ * slot only for the model call so the waits stay parallel while the expensive
+ * work stays bounded.
+ */
+async function runDebateLane(newsId, news, user, cooldowns, apologized, failuresByUser, laneSlots) {
+  while (isDiscussionActive(newsId)) {
+    const settings = normalizeDiscussionSettings(user);
+
+    const delayMs = nextDelayMs(settings);
+    if (delayMs > 0 && !(await waitForDiscussion(newsId, delayMs))) return;
+    if (!isDiscussionActive(newsId)) return;
+
+    const check = canPostMessage({
+      messageCount: messageCountFor(newsId, user.id),
+      consecutiveCount: consecutiveCountFor(newsId, user.id),
+      settings
+    });
+    if (!check.allowed) {
+      if (check.reason === 'max_messages_per_news') return;
+      // Somebody else has to speak before this personality may again.
       if (!(await waitForDiscussion(newsId, DISCUSSION_IDLE_RECHECK_MS))) return;
       continue;
     }
 
-    const delayMs = nextDelayMs(picked.settings);
-    if (delayMs > 0 && !(await waitForDiscussion(newsId, delayMs))) return;
+    const now = Date.now();
+    const cooldownUntil = cooldowns.get(user.id) || 0;
+    if (cooldownUntil > now) {
+      if (!(await waitForDiscussion(newsId, Math.min(DISCUSSION_IDLE_RECHECK_MS, cooldownUntil - now)))) return;
+      continue;
+    }
 
-    const prompt = buildDiscussionPrompt(news, picked.user, commentThread(newsId));
-    broadcastAgentActivity(newsId, picked.user, 'requesting');
-    const result = await callMeterlessAI({
-      newsId,
-      user: picked.user,
-      prompt: prompt.user,
-      systemPrompt: prompt.system
+    broadcastAgentActivity(newsId, user, 'requesting', { laneRole: LANE_ROLES.DEBATER });
+
+    // Build the prompt inside the slot so the lane sees the freshest thread.
+    const result = await withTurnSlot(laneSlots, () => {
+      const prompt = buildDiscussionPrompt(news, user, commentThread(newsId));
+      return callMeterlessAI({ newsId, user, prompt: prompt.user, systemPrompt: prompt.system });
     });
-
     if (!isDiscussionActive(newsId)) return;
 
     if (result.answer && !result.error) {
-      cooldowns.delete(picked.user.id);
-      apologized.delete(picked.user.id);
-      failuresByUser.delete(picked.user.id);
-      const comment = await addComment(newsId, picked.user.id, result.answer, true, {
+      cooldowns.delete(user.id);
+      apologized.delete(user.id);
+      failuresByUser.delete(user.id);
+      const comment = await addComment(newsId, user.id, result.answer, true, {
         logEntryId: result.entry?.id ?? null
       });
-      broadcastAgentActivity(newsId, picked.user, 'success', {
+      broadcastAgentActivity(newsId, user, 'success', {
+        laneRole: LANE_ROLES.DEBATER,
         commentId: comment?.id ?? null
       });
       continue;
     }
 
-    // The provider failed after all retries. Say it in the personality's own
-    // voice once, keep the machine details behind an error button, and let the
-    // other participants carry the discussion.
-    const failure = describeMeterlessFailure(result.error, picked.user.modelName);
-    const strikes = (failuresByUser.get(picked.user.id) || 0) + 1;
-    failuresByUser.set(picked.user.id, strikes);
-    const cooldownMs = Math.min(
-      DISCUSSION_MAX_COOLDOWN_MS,
-      DISCUSSION_FAILURE_COOLDOWN_MS * strikes
-    );
-    cooldowns.set(picked.user.id, Date.now() + cooldownMs);
-
-    broadcastAgentActivity(newsId, picked.user, 'error', {
-      code: failure.code,
-      message: failure.message
-    });
-
-    if (!apologized.has(picked.user.id)) {
-      apologized.add(picked.user.id);
-      await addComment(newsId, picked.user.id, failure.text, true, {
-        isError: true,
-        logEntryId: result.entry?.id ?? null,
-        error: {
-          code: failure.code,
-          message: failure.message,
-          attempts: failure.attempts
-        }
-      });
-    }
+    await handleLaneFailure(newsId, user, cooldowns, apologized, failuresByUser, result, LANE_ROLES.DEBATER);
   }
+}
+
+/**
+ * The closing (fan-in) lane: one personality reads the whole thread and posts
+ * a short summary. A summary is flagged so it never counts toward the message
+ * limits.
+ */
+async function runSummaryLane(newsId, news, summarizer) {
+  if (!isDiscussionActive(newsId)) return;
+
+  const prompt = buildSummaryPrompt(news, summarizer, commentThread(newsId));
+  broadcastAgentActivity(newsId, summarizer, 'requesting', { laneRole: LANE_ROLES.SUMMARIZER });
+
+  await turnSlots.acquire();
+  let result;
+  try {
+    if (!isDiscussionActive(newsId)) return;
+    result = await callMeterlessAI({
+      newsId,
+      user: summarizer,
+      prompt: prompt.user,
+      systemPrompt: prompt.system
+    });
+  } finally {
+    turnSlots.release();
+  }
+
+  if (!isDiscussionActive(newsId)) return;
+
+  if (result.answer && !result.error) {
+    await addComment(newsId, summarizer.id, result.answer, true, {
+      logEntryId: result.entry?.id ?? null,
+      isSummary: true
+    });
+    broadcastAgentActivity(newsId, summarizer, 'success', {
+      laneRole: LANE_ROLES.SUMMARIZER
+    });
+    return;
+  }
+
+  broadcastAgentActivity(newsId, summarizer, 'error', {
+    laneRole: LANE_ROLES.SUMMARIZER,
+    code: result.error?.code,
+    message: result.error?.message
+  });
 }
 
 /**
@@ -874,7 +1107,10 @@ async function startDiscussion(newsId) {
       ok: true,
       alreadyRunning: true,
       aiParticipants: discussionAgents(existing).length,
-      agentIds: existing.agentIds || []
+      agentIds: existing.agentIds || [],
+      phase: existing.phase || 'discuss',
+      parallelLanes: existing.parallelLanes || currentSettings().parallelLanes,
+      lanes: discussionLanes(existing)
     };
   }
 
@@ -932,12 +1168,27 @@ async function startDiscussion(newsId) {
   }
 
   const settings = currentSettings();
+  const pipeline = normalizePipeline(settings.pipeline);
+  const laneLimit = Math.max(1, settings.parallelLanes);
+
+  if (!pipeline.analyze && !pipeline.discuss && !pipeline.summarize) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'no_phases_enabled',
+      error: 'Every discussion phase is disabled. Enable at least one under Users → Discussion pipeline.'
+    };
+  }
+
   const roster = sampleAiUsers(withBudget, settings.agentsPerNews);
 
   const discussion = {
     active: true,
     startedAt: new Date().toISOString(),
     stoppedReason: null,
+    phase: pipeline.analyze ? 'analyze' : pipeline.discuss ? 'discuss' : 'summarize',
+    pipeline,
+    parallelLanes: laneLimit,
     // The personalities that "see" this news item, frozen for this run.
     agentIds: roster.map(user => user.id),
     agentModels: roster.map(user => ({
@@ -955,6 +1206,8 @@ async function startDiscussion(newsId) {
   broadcast('discussion_status', {
     newsId,
     active: true,
+    phase: discussion.phase,
+    lanes: discussionLanes(discussion),
     agents: discussion.agentModels
   });
   discussion.runner = runDiscussion(newsId, news).catch(error => {
@@ -972,8 +1225,12 @@ async function startDiscussion(newsId) {
     ok: true,
     aiParticipants: roster.length,
     agentsPerNews: settings.agentsPerNews,
+    parallelLanes: discussion.parallelLanes,
+    phase: discussion.phase,
+    pipeline: discussion.pipeline,
     agentIds: discussion.agentIds,
     agents: discussion.agentModels,
+    lanes: discussionLanes(discussion),
     skippedAgents
   };
 }
@@ -1012,6 +1269,7 @@ async function addComment(newsId, userId, text, isAI = false, extra = {}) {
 
   if (Number.isInteger(extra.logEntryId)) comment.logEntryId = extra.logEntryId;
   if (extra.isError) comment.isError = true;
+  if (extra.isSummary) comment.isSummary = true;
   if (extra.error && typeof extra.error === 'object') {
     comment.error = {
       code: typeof extra.error.code === 'string' ? extra.error.code : 'error',
@@ -1284,6 +1542,9 @@ app.get('/api/news/:id', (req, res) => {
     comments,
     discussionActive: discussion?.active || false,
     discussionStoppedReason: discussion?.stoppedReason || null,
+    discussionPhase: discussion?.phase || null,
+    discussionParallelLanes: discussion?.parallelLanes || null,
+    discussionPipeline: discussion?.pipeline || null,
     // Which personalities "see" this news item right now.
     discussionAgents: discussion
       ? discussionAgents(discussion).map(user => ({
@@ -1292,6 +1553,7 @@ app.get('/api/news/:id', (req, res) => {
           model: user.modelName
         }))
       : [],
+    discussionLanes: discussion ? discussionLanes(discussion) : [],
     discussionSkippedAgents: discussion?.skippedAgents || []
   });
 });

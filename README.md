@@ -87,14 +87,14 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
 
 ### Page reference
 
-| Page                    | Route        | What you can do                                                                                                                                                                                                |
-| ----------------------- | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **News Feed**           | `/feed`      | **🔄 Refresh**, expand an article, **Read full article →**, **▶ Start Discussion** / **⏹ Stop Discussion**, live comments with **🔎 Ask & thinking** / **⚠ Error details**, **Send** your own comment          |
-| **RSS Sources**         | `/sources`   | **+ Add Source**, **Fetch all now**, per-feed **Fetch now** and **Delete**, item count, last fetch time, last error                                                                                            |
-| **Users**               | `/users`     | **+ Add User**, **Edit** a personality (who am I, model, personality and every discussion setting), **Delete** (the local participant is protected)                                                            |
-| **AI Provider**         | `/providers` | Meterless Runtime and Zetaris status badges, **Save** base URL/token, **Auto Detect**, **Re-check status**, paste a **Connect** link, **Refresh** models, **Send test request**, **Run query** (read-only SQL) |
-| **Add RSS Source form** | `/add-rss`   | Direct link to the feed form with popular-feed examples                                                                                                                                                        |
-| **Add User form**       | `/add-user`  | Direct link to the personality form with personality examples                                                                                                                                                  |
+| Page                    | Route        | What you can do                                                                                                                                                                                                                                   |
+| ----------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **News Feed**           | `/feed`      | **🔄 Refresh**, expand an article, **Read full article →**, **▶ Start Discussion** / **⏹ Stop Discussion**, live comments with **🔎 Ask & thinking** / **⚠ Error details**, **Send** your own comment                                             |
+| **RSS Sources**         | `/sources`   | **+ Add Source**, **Fetch all now**, per-feed **Fetch now** and **Delete**, item count, last fetch time, last error                                                                                                                               |
+| **Users**               | `/users`     | **+ Add User**, **Edit** a personality (who am I, model, personality and every discussion setting), **Delete** (the local participant is protected); also the deployment-wide **Agents per news**, **Parallel lanes** and **Discussion pipeline** |
+| **AI Provider**         | `/providers` | Meterless Runtime and Zetaris status badges, **Save** base URL/token, **Auto Detect**, **Re-check status**, paste a **Connect** link, **Refresh** models, **Send test request**, **Run query** (read-only SQL)                                    |
+| **Add RSS Source form** | `/add-rss`   | Direct link to the feed form with popular-feed examples                                                                                                                                                                                           |
+| **Add User form**       | `/add-user`  | Direct link to the personality form with personality examples                                                                                                                                                                                     |
 
 ### What happens behind the UI
 
@@ -127,6 +127,20 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   discussion actually starts, so an unread article no longer lists every AI as
   "seeing" it. During a run the feed shows a live **👀 / ✅ / ❌** badge per
   active turn instead of the full roster.
+- **Multi-lane orchestration.** A discussion runs a pipeline of three stages —
+  **🔍 Analysis** (fan-out: every assigned personality posts its opening in
+  parallel), **💬 Discussion** (the parallel conversation) and **🧾 Summary**
+  (fan-in: one personality writes the closing digest). `parallelLanes` (1–5,
+  default **1**) caps how many personalities may hold a lane at once; `1` keeps
+  the classic turn-by-turn thread, `2–5` lets several lanes speak concurrently.
+  Raising it above `agentsPerNews` raises `agentsPerNews` to match, so asking
+  for more lanes always means more voices. Both the phases and the lane count
+  are edited on the **Users** page and
+  persisted through `GET` / `PUT /api/settings`. A global cap
+  (`SELO_MAX_CONCURRENT_TURNS`, default `8`) bounds the number of simultaneous
+  model calls across all active discussions. The feed renders the current phase
+  and a live lane strip (role + 👀/✅/❌ per lane), and the closing summary is
+  styled as its own comment kind.
 - **Every configured model id is sent to the runtime as-is.** The runtime is
   what routes an id: a routing mode (`meterless/auto`), a catalogue id
   (`openrouter/qwen/qwen3.8-27b:free`) and a plain alias the Provider page
@@ -183,36 +197,36 @@ sent`, then `✅ … · <ms> · <answer preview>` or `❌ … · <error>`) inste
 
 There is no auth header anywhere; every route below is open by design.
 
-| Method         | Route                                            | Purpose                                                                 |
-| -------------- | ------------------------------------------------ | ----------------------------------------------------------------------- |
-| `GET`          | `/health`                                        | Liveness probe (`{ status, uptime }`)                                   |
-| `GET` / `PUT`  | `/api/participant`                               | Read or rename the local participant                                    |
-| `GET` / `POST` | `/api/rss-sources`                               | List feeds with stats / add a feed                                      |
-| `POST`         | `/api/rss-sources/:id/fetch`                     | Poll one feed                                                           |
-| `DELETE`       | `/api/rss-sources/:id`                           | Remove a feed                                                           |
-| `POST`         | `/api/news/fetch`                                | Poll every feed and return per-source results                           |
-| `GET`          | `/api/news`                                      | News items, newest first                                                |
-| `GET`          | `/api/news/:id`                                  | One item with comments, `discussionActive`, its agents and skipped ones |
-| `GET`          | `/api/activity`                                  | Per agent + model: in-flight, completed, failed requests                |
-| `GET` / `PUT`  | `/api/settings`                                  | Global discussion settings (`agentsPerNews`, 1–5, default 1)            |
-| `GET` / `POST` | `/api/users`                                     | List / create personalities (including discussion settings)             |
-| `PUT`          | `/api/users/:id`                                 | Edit a personality and its discussion settings                          |
-| `DELETE`       | `/api/users/:id`                                 | Delete a personality                                                    |
-| `POST`         | `/api/comments`                                  | Add a comment as the participant (`newsId`, `userId`, `text`)           |
-| `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start (`202`, non-blocking) or stop the AI loop for a `newsId`          |
-| `GET`          | `/api/meterless/log?newsId=…&limit=…`            | ask / think / answer records, newest first                              |
-| `DELETE`       | `/api/meterless/log?newsId=…`                    | Clear the log (one news item, or all of it)                             |
-| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                                         |
-| `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`               |
-| `GET`          | `/api/providers/status`                          | Summary of both providers                                               |
-| `GET`          | `/api/providers`                                 | Registered provider descriptors                                         |
-| `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                                 |
-| `PUT`          | `/api/providers/meterless/config`                | Save base URL and/or token                                              |
-| `POST`         | `/api/providers/meterless/detect`                | Auto-detect a runtime on the usual ports                                |
-| `POST`         | `/api/providers/meterless/connect`               | Apply a `http://host:port/connect#k=…` link                             |
-| `GET`          | `/api/providers/meterless/models`                | Models / routing modes                                                  |
-| `GET`          | `/api/providers/meterless/health`                | Runtime `/healthz` probe                                                |
-| `POST`         | `/api/providers/meterless/chat`                  | One chat request (`model`, `messages`)                                  |
+| Method         | Route                                            | Purpose                                                                                                     |
+| -------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `GET`          | `/health`                                        | Liveness probe (`{ status, uptime }`)                                                                       |
+| `GET` / `PUT`  | `/api/participant`                               | Read or rename the local participant                                                                        |
+| `GET` / `POST` | `/api/rss-sources`                               | List feeds with stats / add a feed                                                                          |
+| `POST`         | `/api/rss-sources/:id/fetch`                     | Poll one feed                                                                                               |
+| `DELETE`       | `/api/rss-sources/:id`                           | Remove a feed                                                                                               |
+| `POST`         | `/api/news/fetch`                                | Poll every feed and return per-source results                                                               |
+| `GET`          | `/api/news`                                      | News items, newest first                                                                                    |
+| `GET`          | `/api/news/:id`                                  | One item with comments, `discussionActive`, its agents and skipped ones                                     |
+| `GET`          | `/api/activity`                                  | Per agent + model: in-flight, completed, failed requests                                                    |
+| `GET` / `PUT`  | `/api/settings`                                  | Global discussion settings (`agentsPerNews` 1–5, `parallelLanes` 1–5, `pipeline.analyze/discuss/summarize`) |
+| `GET` / `POST` | `/api/users`                                     | List / create personalities (including discussion settings)                                                 |
+| `PUT`          | `/api/users/:id`                                 | Edit a personality and its discussion settings                                                              |
+| `DELETE`       | `/api/users/:id`                                 | Delete a personality                                                                                        |
+| `POST`         | `/api/comments`                                  | Add a comment as the participant (`newsId`, `userId`, `text`)                                               |
+| `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start (`202`, non-blocking) or stop the AI loop for a `newsId`                                              |
+| `GET`          | `/api/meterless/log?newsId=…&limit=…`            | ask / think / answer records, newest first                                                                  |
+| `DELETE`       | `/api/meterless/log?newsId=…`                    | Clear the log (one news item, or all of it)                                                                 |
+| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                                                                             |
+| `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`                                                   |
+| `GET`          | `/api/providers/status`                          | Summary of both providers                                                                                   |
+| `GET`          | `/api/providers`                                 | Registered provider descriptors                                                                             |
+| `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                                                                     |
+| `PUT`          | `/api/providers/meterless/config`                | Save base URL and/or token                                                                                  |
+| `POST`         | `/api/providers/meterless/detect`                | Auto-detect a runtime on the usual ports                                                                    |
+| `POST`         | `/api/providers/meterless/connect`               | Apply a `http://host:port/connect#k=…` link                                                                 |
+| `GET`          | `/api/providers/meterless/models`                | Models / routing modes                                                                                      |
+| `GET`          | `/api/providers/meterless/health`                | Runtime `/healthz` probe                                                                                    |
+| `POST`         | `/api/providers/meterless/chat`                  | One chat request (`model`, `messages`)                                                                      |
 
 WebSocket messages accepted by the server: `start_discussion`, `stop_discussion`
 and `add_comment`, each with a `data` object. A refused `start_discussion` is
@@ -666,19 +680,23 @@ npm run smoke             # boots the API and checks the no-login flow end to en
    - The HTTP call returns `202` immediately; the AI work runs in the background
    - The personality pool is every AI user (the local human participant is not)
    - `agentsPerNews` personalities (1–5, default **1**) are drawn **at random**
-     from that pool and frozen for this run; the feed shows a live **👀 / ✅ /
-     ❌** badge for the current turn and names whoever was skipped
-   - One background runner per news item; each turn picks the next speaker at
-     random among the assigned ones, so the order is not predictable
-   - Each personality follows its own settings: send immediately or wait a
-     random delay inside its min/max range, stop at `maxMessagesPerNews`, and
-     step aside after `maxConsecutiveMessages` own messages in a row (the runner
-     waits for somebody else — typically the human — to speak again)
+     from that pool and frozen for this run
+   - One background runner per news item executes the configured pipeline:
+     **Analysis** (fan-out) → **Discussion** (parallel lanes) → **Summary**
+     (fan-in, optional). The feed shows the live phase and a lane strip with a
+     **👀 / ✅ / ❌** badge per lane
+   - `parallelLanes` (1–5, default **1**) caps how many lanes may speak at
+     once; `1` is turn-by-turn, `2–5` lets several personalities post
+     concurrently. Each lane still keeps its own pacing and limits: send
+     immediately or wait a random delay inside its min/max range, stop at
+     `maxMessagesPerNews`, and step aside after `maxConsecutiveMessages` own
+     messages in a row
    - Provider failures never stop the discussion: the call is retried, the
      personality posts one in-character apology with error details, then rests
      with a growing cooldown while the others continue
    - The discussion stops by itself only when every assigned AI reached its
-     per-news limit (`max_messages`)
+     per-news limit (`max_messages`), and the closing summary (when enabled)
+     never counts toward that limit
    - Responses limited to 2-3 sentences, temperature 0.8, `max_tokens: 700`
 
 2. AI prompts contain as much of the conversation as fits (`PROMPT_*` in

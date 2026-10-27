@@ -63,6 +63,61 @@ function AgentActivityLine({ agents, activity }) {
   );
 }
 
+const PHASES = {
+  analyze: { label: 'Analysis', emoji: '🔍' },
+  discuss: { label: 'Discussion', emoji: '💬' },
+  summarize: { label: 'Summary', emoji: '🧾' }
+};
+
+const LANE_ROLE_EMOJI = {
+  analyst: '🔍',
+  debater: '💬',
+  summarizer: '🧾'
+};
+
+function PhaseChip({ phase }) {
+  const info = PHASES[phase];
+  if (!info) return null;
+  return <span className={`phase-chip ${phase}`}>{info.emoji} {info.label}</span>;
+}
+
+/**
+ * The multi-lane view: one chip per assigned personality, showing which role
+ * it plays in the current pipeline phase and its live status (👀/✅/❌).
+ */
+function LaneStrip({ lanes, activity }) {
+  const list = Array.isArray(lanes) ? lanes : [];
+  if (list.length === 0) return null;
+
+  return (
+    <div className="lane-strip">
+      {list.map(lane => {
+        const live = (activity && activity[lane.id]) || {};
+        const statusEmoji =
+          live.status === 'error'
+            ? '❌'
+            : live.status === 'success'
+              ? '✅'
+              : live.status === 'requesting'
+                ? '👀'
+                : '';
+        const roleEmoji = LANE_ROLE_EMOJI[lane.role] || '💬';
+        return (
+          <span
+            key={lane.id}
+            className={`lane ${live.status || 'idle'}`}
+            title={`${lane.name} · ${lane.model} — ${lane.role}`}
+          >
+            <span className="lane-role">{roleEmoji}</span>
+            <span className="lane-name">{lane.name}</span>
+            {statusEmoji && <span className="lane-status">{statusEmoji}</span>}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function NewsFeed() {
   const [news, setNews] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -79,6 +134,8 @@ function NewsFeed() {
   const [detailsError, setDetailsError] = useState({});
   const [discussionAgents, setDiscussionAgents] = useState({});
   const [skippedAgents, setSkippedAgents] = useState({});
+  const [discussionPhase, setDiscussionPhase] = useState({});
+  const [discussionLanes, setDiscussionLanes] = useState({});
   const [newCommentText, setNewCommentText] = useState('');
   const [participant, setParticipant] = useState(null);
   const commentsEndRef = useRef(null);
@@ -160,7 +217,25 @@ function NewsFeed() {
             if (Array.isArray(data.agents)) {
               setDiscussionAgents(prev => ({ ...prev, [data.newsId]: data.agents }));
             }
+            if (data.phase) {
+              setDiscussionPhase(prev => ({ ...prev, [data.newsId]: data.phase }));
+            }
+            if (Array.isArray(data.lanes)) {
+              setDiscussionLanes(prev => ({ ...prev, [data.newsId]: data.lanes }));
+            }
             if (!data.active) {
+              setDiscussionPhase(prev => {
+                if (!prev[data.newsId]) return prev;
+                const next = { ...prev };
+                delete next[data.newsId];
+                return next;
+              });
+              setDiscussionLanes(prev => {
+                if (!prev[data.newsId]) return prev;
+                const next = { ...prev };
+                delete next[data.newsId];
+                return next;
+              });
               setAgentStatus(prev => {
                 if (!prev[data.newsId]) return prev;
                 const next = { ...prev };
@@ -251,6 +326,8 @@ function NewsFeed() {
           : response.data.discussionStoppedReason || ''
       }));
       setDiscussionAgents(prev => ({ ...prev, [newsId]: response.data.discussionAgents || [] }));
+      setDiscussionPhase(prev => ({ ...prev, [newsId]: response.data.discussionPhase || null }));
+      setDiscussionLanes(prev => ({ ...prev, [newsId]: response.data.discussionLanes || [] }));
       setSkippedAgents(prev => ({
         ...prev,
         [newsId]: response.data.discussionSkippedAgents || []
@@ -272,6 +349,8 @@ function NewsFeed() {
       const { data } = await axios.post(`${API_BASE}/discussion/start`, { newsId });
       setDiscussionActive(prev => ({ ...prev, [newsId]: true }));
       setDiscussionAgents(prev => ({ ...prev, [newsId]: data?.agents || [] }));
+      setDiscussionPhase(prev => ({ ...prev, [newsId]: data?.phase || null }));
+      setDiscussionLanes(prev => ({ ...prev, [newsId]: data?.lanes || [] }));
       setSkippedAgents(prev => ({ ...prev, [newsId]: data?.skippedAgents || [] }));
       if (data?.message) console.info(data.message);
     } catch (error) {
@@ -490,6 +569,14 @@ function NewsFeed() {
                     </button>
                   </div>
 
+                  {discussionActive[item.id] &&
+                    (discussionPhase[item.id] || (discussionLanes[item.id] || []).length > 0) && (
+                      <div className="lanes-bar">
+                        <PhaseChip phase={discussionPhase[item.id]} />
+                        <LaneStrip lanes={discussionLanes[item.id]} activity={agentStatus[item.id]} />
+                      </div>
+                    )}
+
                   {logOpen[item.id] && <MeterlessLogPanel newsId={item.id} />}
 
                   <div className="discussion-comments">
@@ -507,16 +594,20 @@ function NewsFeed() {
                         return (
                           <div
                             key={comment.id}
-                            className={`comment ${comment.isAI ? 'ai' : 'user'}${
-                              comment.error ? ' error' : ''
-                            }`}
+                            className={`comment ${
+                              comment.isSummary ? 'summary' : comment.isAI ? 'ai' : 'user'
+                            }${comment.error ? ' error' : ''}`}
                           >
                             <div className="comment-header">
                               <span className={`comment-author ${comment.isAI ? 'ai' : 'user'}`}>
                                 {comment.userName} {comment.isAI ? '🤖' : '👤'}
                               </span>
-                              <span className={`comment-badge ${comment.isAI ? 'ai' : 'user'}`}>
-                                {comment.isAI ? 'AI' : 'User'}
+                              <span
+                                className={`comment-badge ${
+                                  comment.isSummary ? 'summary' : comment.isAI ? 'ai' : 'user'
+                                }`}
+                              >
+                                {comment.isSummary ? '🧾 Summary' : comment.isAI ? 'AI' : 'User'}
                               </span>
                               <span className="comment-time">
                                 {formatDate(comment.timestamp)}

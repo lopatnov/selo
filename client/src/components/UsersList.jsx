@@ -10,6 +10,8 @@ function readError(error) {
   return error.response?.data?.error || error.message || 'Request failed';
 }
 
+const DEFAULT_PIPELINE = { analyze: true, discuss: true, summarize: false };
+
 function UsersList() {
   const [users, setUsers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -17,8 +19,10 @@ function UsersList() {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState('');
   const [error, setError] = useState('');
-  // Deployment-wide setting: how many personalities may discuss one news item.
+  // Deployment-wide settings: roster size, parallel lanes and the pipeline.
   const [agentsPerNews, setAgentsPerNews] = useState(1);
+  const [parallelLanes, setParallelLanes] = useState(1);
+  const [pipeline, setPipeline] = useState(DEFAULT_PIPELINE);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState('');
 
@@ -31,6 +35,12 @@ function UsersList() {
     try {
       const { data } = await axios.get(`${API_BASE}/settings`);
       setAgentsPerNews(Number(data.agentsPerNews) || 1);
+      setParallelLanes(Number(data.parallelLanes) || 1);
+      setPipeline({
+        analyze: data.pipeline?.analyze ?? DEFAULT_PIPELINE.analyze,
+        discuss: data.pipeline?.discuss ?? DEFAULT_PIPELINE.discuss,
+        summarize: data.pipeline?.summarize ?? DEFAULT_PIPELINE.summarize
+      });
     } catch (err) {
       console.error('Failed to load the discussion settings:', err);
     }
@@ -45,8 +55,52 @@ function UsersList() {
     try {
       const { data } = await axios.put(`${API_BASE}/settings`, { agentsPerNews: value });
       setAgentsPerNews(Number(data.agentsPerNews) || value);
+      if (Number.isFinite(Number(data.parallelLanes))) {
+        setParallelLanes(Number(data.parallelLanes));
+      }
     } catch (err) {
       setAgentsPerNews(previous);
+      setSettingsError(readError(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleParallelLanes = async (event) => {
+    const value = Number(event.target.value);
+    const previous = parallelLanes;
+    setParallelLanes(value);
+    setSavingSettings(true);
+    setSettingsError('');
+    try {
+      const { data } = await axios.put(`${API_BASE}/settings`, { parallelLanes: value });
+      setParallelLanes(Number(data.parallelLanes) || value);
+      if (Number.isFinite(Number(data.agentsPerNews))) {
+        setAgentsPerNews(Number(data.agentsPerNews));
+      }
+    } catch (err) {
+      setParallelLanes(previous);
+      setSettingsError(readError(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handlePipelineToggle = phase => async (event) => {
+    const checked = event.target.checked;
+    const next = { ...pipeline, [phase]: checked };
+    setPipeline(next);
+    setSavingSettings(true);
+    setSettingsError('');
+    try {
+      const { data } = await axios.put(`${API_BASE}/settings`, { pipeline: next });
+      setPipeline({
+        analyze: data.pipeline?.analyze ?? next.analyze,
+        discuss: data.pipeline?.discuss ?? next.discuss,
+        summarize: data.pipeline?.summarize ?? next.summarize
+      });
+    } catch (err) {
+      setPipeline({ ...pipeline });
       setSettingsError(readError(err));
     } finally {
       setSavingSettings(false);
@@ -156,6 +210,70 @@ function UsersList() {
             ))}
           </select>
         </div>
+
+        <div className="agent-settings-row">
+          <div className="agent-settings-text">
+            <label htmlFor="parallel-lanes">Parallel lanes</label>
+            <p className="agent-settings-hint">
+              How many of the assigned personalities may speak at the same time.
+              1 keeps the classic turn-by-turn discussion; 2–5 lets several lanes post
+              concurrently. Raising this above <strong>Agents per news</strong> also
+              raises the roster automatically.
+            </p>
+          </div>
+          <select
+            id="parallel-lanes"
+            value={parallelLanes}
+            onChange={handleParallelLanes}
+            disabled={savingSettings}
+          >
+            {[1, 2, 3, 4, 5].map(value => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="agent-settings-row agent-settings-pipeline">
+          <div className="agent-settings-text">
+            <label>Discussion pipeline</label>
+            <p className="agent-settings-hint">
+              The stages a discussion runs through, in order: a parallel analysis opening,
+              the ongoing conversation, then a closing summary.
+            </p>
+          </div>
+          <div className="pipeline-toggles">
+            <label className="pipeline-toggle">
+              <input
+                type="checkbox"
+                checked={pipeline.analyze}
+                onChange={handlePipelineToggle('analyze')}
+                disabled={savingSettings}
+              />
+              <span>🔍 Analysis</span>
+            </label>
+            <label className="pipeline-toggle">
+              <input
+                type="checkbox"
+                checked={pipeline.discuss}
+                onChange={handlePipelineToggle('discuss')}
+                disabled={savingSettings}
+              />
+              <span>💬 Discussion</span>
+            </label>
+            <label className="pipeline-toggle">
+              <input
+                type="checkbox"
+                checked={pipeline.summarize}
+                onChange={handlePipelineToggle('summarize')}
+                disabled={savingSettings}
+              />
+              <span>🧾 Summary</span>
+            </label>
+          </div>
+        </div>
+
         {settingsError && <div className="provider-alert error">{settingsError}</div>}
       </div>
 
