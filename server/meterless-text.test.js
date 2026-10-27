@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { sanitizeModelText, stripModelReasoning } = require('./meterless-text');
+const { sanitizeModelText, stripMetaNarration, stripModelReasoning } = require('./meterless-text');
 
 test('a complete <think> block never leaks into the answer', () => {
   const result = sanitizeModelText(
@@ -55,4 +55,30 @@ test('plain answers and empty input pass through unchanged', () => {
   assert.deepEqual(sanitizeModelText(plain), { think: '', answer: plain });
   assert.deepEqual(sanitizeModelText(''), { think: '', answer: '' });
   assert.deepEqual(sanitizeModelText(null), { think: '', answer: '' });
+});
+
+test('plain-text planning is dropped from the answer', () => {
+  const raw =
+    '"The user wants me to react as "Alice (meterless/auto)" with the personality of ' +
+    '"The Workaholic (The Career-driven Professional)". This is an ambitious, hard-working ' +
+    'professional. Let me write a';
+
+  assert.equal(sanitizeModelText(raw).answer, '');
+  assert.equal(stripMetaNarration(raw), '');
+});
+
+test('planning sentences are removed but the real reaction survives', () => {
+  const raw =
+    'The user wants me to react as Alice. Let me write a short reaction. ' +
+    'I would kill for that sales pipeline, honestly.';
+
+  assert.equal(stripMetaNarration(raw), 'I would kill for that sales pipeline, honestly.');
+});
+
+test('a fully quoted answer is unwrapped, quoted speech inside it is kept', () => {
+  assert.equal(stripMetaNarration('"Ship it on Friday."'), 'Ship it on Friday.');
+  assert.equal(
+    stripMetaNarration('"The market will eat them," she said.'),
+    '"The market will eat them," she said.'
+  );
 });

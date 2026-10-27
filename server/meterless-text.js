@@ -36,6 +36,62 @@ function stripTagFragments(text) {
   return text.replace(new RegExp(`<\\/?(${TAG_ALT})\\b[^>]*>?`, 'gi'), ' ');
 }
 
+// Some models return their planning as plain text instead of reasoning tags:
+// "The user wants me to react as Alice ... Let me write a ...". None of that
+// may be posted, so such sentences are dropped from the answer.
+const META_PATTERNS = [
+  /\bthe user (?:wants|wanted|asked|is asking|requested|expects) me\b/i,
+  /\bi (?:need|must|should|have|will|'ll) to (?:react|respond|reply|answer|write|craft|produce|generate)\b/i,
+  /\b(?:let me|i'll|i will) (?:write|craft|react|respond|reply|compose|start)\b/i,
+  /\bi(?:'m| am) (?:supposed|asked|required|expected|going) to\b/i,
+  /\bthe personality of\b/i,
+  /\bmy task is to\b/i,
+  /\bthis is an? (?:ai|assistant|language model|personality)\b/i,
+  /\bthis is an? [a-z][^.]{0,80}\b(?:professional|personality|character|persona|archetype|individual|person)\b/i,
+  /\bas an ai\b/i
+];
+
+function isMetaSentence(sentence) {
+  return META_PATTERNS.some(pattern => pattern.test(sentence));
+}
+
+function unwrapQuotes(text) {
+  const value = text.trim();
+  const quoteCount = (value.match(/["'“”‘’]/g) || []).length;
+  const doubleQuoted = /^["“]/.test(value) && /["”]$/.test(value);
+  const singleQuoted = /^['‘]/.test(value) && /['’]$/.test(value);
+  // Only a reply that is entirely quoted is unwrapped; a quote inside a real
+  // answer belongs to the answer.
+  if ((doubleQuoted || singleQuoted) && quoteCount <= 2) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+/**
+ * Remove planning sentences a model wrote as ordinary text, plus the quotes a
+ * truncated "answer" is often wrapped in. In-character sentences are kept.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function stripMetaNarration(text) {
+  const source = toText(text);
+  if (!source.trim()) return '';
+
+  const unwrapped = unwrapQuotes(source);
+  const sentences = unwrapped.split(/(?<=[.!?])\s+|\n+/).filter(part => part.trim());
+  const kept = sentences.filter(sentence => !isMetaSentence(sentence));
+  let answer = tidy(kept.join(' '));
+
+  // A truncated reply often opens with a quote that never closes.
+  const quotes = (answer.match(/["“”]/g) || []).length;
+  if (quotes % 2 === 1 && /^["“]/.test(answer)) answer = answer.slice(1).trim();
+
+  // Everything was planning: there is nothing worth posting.
+  return answer;
+}
+
 /**
  * Split a model reply into reasoning (`think`) and the text to post (`answer`).
  *
@@ -86,6 +142,8 @@ function sanitizeModelText(raw) {
     answer = answer.replace(/^\s*(answer|reaction|response|final answer)\s*[:\-—]\s*/i, '');
   }
   answer = tidy(answer);
+  // Plain-text planning ("the user wants me to…") is reasoning too.
+  answer = stripMetaNarration(answer);
 
   return {
     think: tidy(thinkParts.join('\n\n')),
@@ -101,5 +159,6 @@ function stripModelReasoning(raw) {
 module.exports = {
   REASONING_TAGS,
   sanitizeModelText,
+  stripMetaNarration,
   stripModelReasoning
 };

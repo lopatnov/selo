@@ -14,6 +14,11 @@ const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { sanitizeModelText } = require('./meterless-text');
 const { createMeterlessLog } = require('./meterless-log');
+const {
+  canPostMessage,
+  nextDelayMs,
+  normalizeDiscussionSettings
+} = require('./discussion-settings');
 
 const app = express();
 const server = http.createServer(app);
@@ -118,23 +123,58 @@ function logMeterlessCall(entry) {
   );
 }
 
+const AI_MAX_ATTEMPTS = 3;
+const AI_RETRY_DELAY_MS = 900;
+// A rejected token or a missing key cannot be fixed by repeating the request.
+const AI_NON_RETRYABLE = new Set(['unauthorized', 'invalid_token', 'invalid_request']);
+
+// Turn the final failure into a message a personality can actually say, plus
+// the machine-readable details the UI shows behind an error button.
+function describeMeterlessFailure(error) {
+  const code = error?.code || 'error';
+  const message = error?.message || 'Meterless request failed.';
+  const attempts = Number.isInteger(error?.attempts) ? error.attempts : null;
+
+  if (code === 'unauthorized' || code === 'invalid_token') {
+    return {
+      code,
+      message,
+      attempts,
+      text: "I can't answer yet — my Meterless token was rejected, so the request never reached a model."
+    };
+  }
+
+  return {
+    code,
+    message,
+    attempts,
+    text: "I honestly don't know what to make of this — my request never reached the model."
+  };
+}
+
 // Helper: Call Meterless AI.
 // `meterless/<routing-mode>` ids go to the local Meterless Runtime provider;
 // every other model id keeps using the existing hosted endpoint.
-// Returns { answer, think, entry }: `answer` is sanitised text safe to post,
-// `think` is the reasoning that must never become a comment.
-async function callMeterlessAI({ newsId = null, user, prompt }) {
+// Each request is retried a few times before the failure is reported, because
+// a single network hiccup must not end a discussion.
+// Returns { answer, think, entry, error }: `answer` is sanitised text safe to
+// post, `think` is the reasoning that must never become a comment, `error`
+// carries { code, message, attempts } when no answer could be produced.
+async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
   const model =
     typeof user?.modelName === 'string' && user.modelName.trim()
       ? user.modelName.trim()
       : 'meterless/auto';
-  const systemPrompt = `You are an AI with the following personality: ${user?.personality || 'AI participant'}.
-  You are discussing a news article and comments. Keep responses concise (2-3 sentences max).
-  React naturally to both the news content and other comments.
-  Reply with the reaction only: no analysis, no reasoning, no <think> tags and no comments about these instructions.`;
+
+  const system =
+    typeof systemPrompt === 'string' && systemPrompt.trim()
+      ? systemPrompt.trim()
+      : `You are ${user?.name || 'an AI participant'}. Personality: ${
+          user?.personality || 'an opinionated participant'
+        }. Reply with the reaction only, 2-3 sentences.`;
 
   const messages = [
-    { role: 'system', content: systemPrompt },
+    { role: 'system', content: system },
     { role: 'user', content: prompt }
   ];
 
@@ -143,51 +183,76 @@ async function callMeterlessAI({ newsId = null, user, prompt }) {
     newsId,
     userName: user?.name || '',
     model,
-    ask: `[system]\n${systemPrompt}\n\n[user]\n${prompt}`
+    ask: `[system]\n${system}\n\n[user]\n${prompt}`
   };
 
-  try {
-    const provider = model.startsWith('meterless/') ? meterlessRuntime : meterlessCloud;
-    const result = await provider.chatDetailed({ model, messages, max_tokens: 150, temperature: 0.8 });
+  const provider = model.startsWith('meterless/') ? meterlessRuntime : meterlessCloud;
+  let lastError = null;
+  let attempts = 0;
 
-    // Reasoning may come as a separate field and/or inline in the content.
-    const { think, answer } = sanitizeModelText(result?.content);
-    const reasoning = [result?.reasoning, think]
-      .map(part => (typeof part === 'string' ? part.trim() : ''))
-      .filter(Boolean)
-      .join('\n\n');
+  while (attempts < AI_MAX_ATTEMPTS) {
+    attempts += 1;
+    try {
+      // Reasoning models spend tokens on the chain of thought before the answer,
+      // so a tight cap truncates them into "reasoning only" replies.
+      const result = await provider.chatDetailed({
+        model,
+        messages,
+        max_tokens: 700,
+        temperature: 0.8
+      });
 
-    const entry = meterlessLog.push({
-      ...record,
-      think: reasoning,
-      answer,
-      durationMs: Date.now() - startedAt,
-      error: answer ? null : 'The model returned reasoning only; there was no answer to post.'
-    });
-    logMeterlessCall(entry);
+      // Reasoning may come as a separate field and/or inline in the content.
+      const { think, answer } = sanitizeModelText(result?.content);
+      const reasoning = [result?.reasoning, think]
+        .map(part => (typeof part === 'string' ? part.trim() : ''))
+        .filter(Boolean)
+        .join('\n\n');
 
-    return { answer, think: reasoning, entry };
-  } catch (error) {
-    const entry = meterlessLog.push({
-      ...record,
-      think: '',
-      answer: '',
-      durationMs: Date.now() - startedAt,
-      error: error?.message || 'Meterless request failed.'
-    });
-    logMeterlessCall(entry);
-    // Never log the token or a connect link. Only the safe error message.
-    console.error(`Meterless request failed (${error.code || 'error'}): ${error.message}`);
+      if (answer) {
+        const entry = meterlessLog.push({
+          ...record,
+          think: reasoning,
+          answer,
+          durationMs: Date.now() - startedAt,
+          error: null
+        });
+        logMeterlessCall(entry);
+        return { answer, think: reasoning, entry, error: null };
+      }
 
-    return {
-      answer:
-        error.code === 'unauthorized'
-          ? '[Meterless rejected the token. Open AI Provider settings and check the token.]'
-          : `[AI Error: ${error.message}]`,
-      think: '',
-      entry
-    };
+      lastError = {
+        code: 'empty_answer',
+        message: 'The model returned reasoning only; there was no answer to post.'
+      };
+      console.warn(
+        `Meterless attempt ${attempts}/${AI_MAX_ATTEMPTS} produced no postable answer (${user?.name || 'unknown user'}).`
+      );
+    } catch (error) {
+      lastError = {
+        code: error?.code || 'error',
+        message: error?.message || 'Meterless request failed.'
+      };
+      console.error(
+        `Meterless request failed (attempt ${attempts}/${AI_MAX_ATTEMPTS}, ${lastError.code}): ${lastError.message}`
+      );
+      if (AI_NON_RETRYABLE.has(lastError.code)) break;
+    }
+
+    if (attempts < AI_MAX_ATTEMPTS) await sleep(AI_RETRY_DELAY_MS * attempts);
   }
+
+  const reported = { ...lastError, attempts };
+  const entry = meterlessLog.push({
+    ...record,
+    think: '',
+    answer: '',
+    durationMs: Date.now() - startedAt,
+    error: `${reported.message} (after ${attempts} attempt${attempts === 1 ? '' : 's'})`
+  });
+  logMeterlessCall(entry);
+
+  return { answer: '', think: '', entry, error: reported };
 }
 
 // Broadcast to WebSocket clients
@@ -214,13 +279,91 @@ wss.on('connection', (ws) => {
   });
 });
 
-const DISCUSSION_INTERVAL_MS = 30000;
+// The runner below paces every AI personality with that personality's own
+// settings: send immediately, a min/max delay range, a cap on messages per
+// news item and a cap on consecutive messages.
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const DISCUSSION_MIN_WAIT_SLICE_MS = 250;
+const DISCUSSION_IDLE_RECHECK_MS = 5000;
+// After a failed turn the personality rests while the others keep talking.
+// Repeated failures back off further, up to a couple of minutes.
+const DISCUSSION_FAILURE_COOLDOWN_MS = 15000;
+const DISCUSSION_MAX_COOLDOWN_MS = 120000;
 
 // AI users only: the local human participant (isAI: false, modelName: "human")
 // never posts AI replies.
 function aiParticipants() {
   return storage.users.filter(user => user.isAI !== false && user.modelName !== 'human');
+}
+
+function isDiscussionActive(newsId) {
+  return Boolean(storage.discussions.get(newsId)?.active);
+}
+
+function commentThread(newsId) {
+  return storage.comments.filter(comment => comment.newsId === newsId);
+}
+
+// Error notices are not opinions: they never consume the message budget.
+function messageCountFor(newsId, userId) {
+  return commentThread(newsId).filter(
+    comment => comment.userId === userId && !comment.isError
+  ).length;
+}
+
+// Own messages at the tail of the thread: this is what "consecutive" means.
+// Somebody else's error notice still counts as them speaking, so a broken
+// provider never traps the healthy personalities behind their own limit.
+function consecutiveCountFor(newsId, userId) {
+  const thread = commentThread(newsId);
+  let count = 0;
+  for (let index = thread.length - 1; index >= 0; index -= 1) {
+    const comment = thread[index];
+    if (comment.isError) {
+      if (comment.userId !== userId) break;
+      continue;
+    }
+    if (comment.userId !== userId) break;
+    count += 1;
+  }
+  return count;
+}
+
+// Wait, but abandon the wait the moment the discussion is stopped.
+async function waitForDiscussion(newsId, ms) {
+  const deadline = Date.now() + Math.max(0, ms);
+  for (;;) {
+    if (!isDiscussionActive(newsId)) return false;
+    const left = deadline - Date.now();
+    if (left <= 0) return true;
+    await sleep(Math.min(left, DISCUSSION_MIN_WAIT_SLICE_MS));
+  }
+}
+
+// Round-robin over the AI personalities, skipping the ones that may not post
+// and the ones that are cooling down after a provider failure.
+function pickNextAiUser(newsId, users, cursor, cooldowns = new Map()) {
+  const now = Date.now();
+  for (let offset = 0; offset < users.length; offset += 1) {
+    const index = (cursor + offset) % users.length;
+    const user = users[index];
+    if ((cooldowns.get(user.id) || 0) > now) continue;
+    const settings = normalizeDiscussionSettings(user);
+    const { allowed } = canPostMessage({
+      messageCount: messageCountFor(newsId, user.id),
+      consecutiveCount: consecutiveCountFor(newsId, user.id),
+      settings
+    });
+    if (allowed) return { user, settings, nextCursor: (index + 1) % users.length };
+  }
+  return null;
+}
+
+function allAiAtMessageLimit(newsId, users) {
+  return users.every(user => {
+    const settings = normalizeDiscussionSettings(user);
+    return messageCountFor(newsId, user.id) >= settings.maxMessagesPerNews;
+  });
 }
 
 async function handleWebSocketMessage(ws, type, data) {
@@ -239,52 +382,211 @@ async function handleWebSocketMessage(ws, type, data) {
   }
 }
 
-// Initial AI reactions to a news item. Runs in the background: a cold routing
-// mode can take minutes, so the HTTP request must never wait for it.
-async function reactToNews(newsId, news, aiUsers) {
-  for (const user of aiUsers) {
-    const discussion = storage.discussions.get(newsId);
-    if (!discussion?.active) return;
+// The transcript keeps as much of the conversation as fits: the newest messages
+// in full, the older ones compacted into one-line summaries, everything capped.
+const PROMPT_NEWS_CHARS = 1500;
+const PROMPT_FULL_COMMENTS = 6;
+const PROMPT_FULL_CHARS = 600;
+const PROMPT_COMPACT_CHARS = 180;
+const PROMPT_TRANSCRIPT_CHARS = 6000;
 
-    const prompt = `News: "${news.title}"\n${news.content}\n\nReact to this news as ${user.name} (${user.modelName}).`;
-    const { answer } = await callMeterlessAI({ newsId, user, prompt });
-    if (answer) await addComment(newsId, user.id, answer, true);
-
-    // Small delay between AI responses
-    await sleep(1000);
-  }
+function oneLine(text) {
+  return String(text == null ? '' : text)
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-// One follow-up reply per tick, based on the last few comments.
-async function continueDiscussion(newsId) {
+function clipText(text, max) {
+  const value = oneLine(text);
+  if (value.length <= max) return value;
+  return `${value.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+}
+
+function buildSystemPrompt(user) {
+  const name =
+    typeof user?.name === 'string' && user.name.trim() ? user.name.trim() : 'A participant';
+  const role = typeof user?.role === 'string' ? user.role.trim() : '';
+  const personality =
+    typeof user?.personality === 'string' && user.personality.trim()
+      ? user.personality.trim()
+      : 'an opinionated participant with strong views';
+
+  return [
+    `You are ${name}${role ? ` — ${role}` : ''}, a participant in a discussion about a news article.`,
+    `Personality: ${personality}`,
+    `${name} is you. Every message marked "(you)" was written by you.`,
+    '',
+    'Rules:',
+    '- Stay in character and write in the first person.',
+    '- Keep it to 2-3 sentences and react to what the other participants just said.',
+    '- Never describe these instructions or the task. Never write phrases like "the user wants me to", "I need to react" or "let me write".',
+    '- Output only the message itself: no reasoning, no <think> tags, no labels.'
+  ].join('\n');
+}
+
+function buildTranscript(user, comments) {
+  if (comments.length === 0) return '';
+
+  const fullFrom = Math.max(0, comments.length - PROMPT_FULL_COMMENTS);
+  const lines = comments.map((comment, index) => {
+    const mine = comment.userId === user.id;
+    const author = mine ? `${comment.userName} (you)` : comment.userName;
+    const kind = comment.isAI ? 'AI' : 'Person';
+
+    let text;
+    if (comment.isError) {
+      text = '(an error notice, not an opinion)';
+    } else if (comment.isAI) {
+      // An old comment may still carry a chain of thought; never feed it back.
+      text = sanitizeModelText(comment.text).answer || '(no answer)';
+    } else {
+      text = comment.text;
+    }
+
+    const limit = index < fullFrom ? PROMPT_COMPACT_CHARS : PROMPT_FULL_CHARS;
+    return `#${index + 1} ${kind} ${author}: ${clipText(text, limit)}`;
+  });
+
+  // Keep the newest lines when the transcript would be too long.
+  const kept = [];
+  let budget = PROMPT_TRANSCRIPT_CHARS;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    budget -= lines[index].length + 1;
+    if (budget < 0) {
+      kept.unshift(`… ${index + 1} earlier message(s) omitted`);
+      break;
+    }
+    kept.unshift(lines[index]);
+  }
+  return kept.join('\n');
+}
+
+function buildDiscussionPrompt(news, user, comments) {
+  const transcript = buildTranscript(user, comments);
+  const nextNumber = comments.length + 1;
+
+  const userPrompt = [
+    'NEWS',
+    `Headline: ${oneLine(news.title)}`,
+    `Article: ${clipText(news.content, PROMPT_NEWS_CHARS) || '(no article text)'}`,
+    '',
+    'DISCUSSION SO FAR (oldest to newest; "(you)" is you)',
+    transcript || 'Nobody has spoken yet.',
+    '',
+    comments.length === 0
+      ? `Write the opening message #${nextNumber} as ${user.name}, reacting to the news.`
+      : `Write message #${nextNumber} as ${user.name}. React to the latest messages and add something new.`
+  ].join('\n');
+
+  return { system: buildSystemPrompt(user), user: userPrompt };
+}
+
+function finishDiscussion(newsId, reason) {
+  const current = storage.discussions.get(newsId);
+  if (!current?.active) return;
+  storage.discussions.set(newsId, {
+    ...current,
+    active: false,
+    stoppedReason: reason,
+    stoppedAt: new Date().toISOString()
+  });
+  broadcast('discussion_status', { newsId, active: false, reason });
+  console.log(`Discussion stopped for ${newsId}: ${reason}`);
+}
+
+/**
+ * One background runner per news item. It walks the personalities round-robin,
+ * so every AI gets its turn instead of a single voice taking the whole thread,
+ * and it honours each personality's own pacing and limits.
+ *
+ * Runs in the background on purpose: a cold routing mode can take minutes, so
+ * the HTTP request must never wait for the first answer.
+ */
+async function runDiscussion(newsId, news) {
   const discussion = storage.discussions.get(newsId);
-  if (!discussion?.active || discussion.busy) return;
-  discussion.busy = true;
+  if (!discussion) return;
 
-  try {
-    const recentComments = storage.comments.filter(c => c.newsId === newsId).slice(-5);
-    if (recentComments.length === 0) return;
+  // Per-turn state: who is resting after a failure, who already showed an
+  // error notice (so a dead provider does not spam the thread), and how many
+  // times each personality failed in a row.
+  const cooldowns = discussion.cooldowns || new Map();
+  const apologized = discussion.apologies || new Set();
+  const failuresByUser = discussion.failuresByUser || new Map();
+  discussion.cooldowns = cooldowns;
+  discussion.apologies = apologized;
+  discussion.failuresByUser = failuresByUser;
 
-    const candidates = aiParticipants();
-    if (candidates.length === 0) return;
+  let cursor = 0;
 
-    const user = candidates[Math.floor(Math.random() * candidates.length)];
-    const lastComment = recentComments[recentComments.length - 1];
+  while (isDiscussionActive(newsId)) {
+    const users = aiParticipants();
+    if (users.length === 0) {
+      finishDiscussion(newsId, 'no_ai_users');
+      return;
+    }
 
-    // A comment saved before the reasoning filter existed must not feed its
-    // chain of thought back into the next prompt.
-    const lastText = lastComment.isAI
-      ? sanitizeModelText(lastComment.text).answer || '(reasoning omitted)'
-      : lastComment.text;
+    const picked = pickNextAiUser(newsId, users, cursor, cooldowns);
+    if (!picked) {
+      if (allAiAtMessageLimit(newsId, users)) {
+        finishDiscussion(newsId, 'max_messages');
+        return;
+      }
+      // Either somebody is waiting for another participant to speak, or every
+      // personality is resting after a provider failure. Keep the discussion
+      // alive and try again shortly; never freeze on one bad request.
+      if (!(await waitForDiscussion(newsId, DISCUSSION_IDLE_RECHECK_MS))) return;
+      continue;
+    }
 
-    const prompt = `Previous comment by ${lastComment.isAI ? 'AI' : 'User'} ${lastComment.userName}: "${lastText}"\n\nRespond to this comment as ${user.name} (${user.modelName}).`;
-    const { answer } = await callMeterlessAI({ newsId, user, prompt });
-    if (answer) await addComment(newsId, user.id, answer, true);
-  } catch (error) {
-    console.error(`Discussion loop failed for ${newsId}:`, error.message);
-  } finally {
-    const current = storage.discussions.get(newsId);
-    if (current) current.busy = false;
+    cursor = picked.nextCursor;
+
+    const delayMs = nextDelayMs(picked.settings);
+    if (delayMs > 0 && !(await waitForDiscussion(newsId, delayMs))) return;
+
+    const prompt = buildDiscussionPrompt(news, picked.user, commentThread(newsId));
+    const result = await callMeterlessAI({
+      newsId,
+      user: picked.user,
+      prompt: prompt.user,
+      systemPrompt: prompt.system
+    });
+
+    if (!isDiscussionActive(newsId)) return;
+
+    if (result.answer && !result.error) {
+      cooldowns.delete(picked.user.id);
+      apologized.delete(picked.user.id);
+      failuresByUser.delete(picked.user.id);
+      await addComment(newsId, picked.user.id, result.answer, true, {
+        logEntryId: result.entry?.id ?? null
+      });
+      continue;
+    }
+
+    // The provider failed after all retries. Say it in the personality's own
+    // voice once, keep the machine details behind an error button, and let the
+    // other participants carry the discussion.
+    const failure = describeMeterlessFailure(result.error);
+    const strikes = (failuresByUser.get(picked.user.id) || 0) + 1;
+    failuresByUser.set(picked.user.id, strikes);
+    const cooldownMs = Math.min(
+      DISCUSSION_MAX_COOLDOWN_MS,
+      DISCUSSION_FAILURE_COOLDOWN_MS * strikes
+    );
+    cooldowns.set(picked.user.id, Date.now() + cooldownMs);
+
+    if (!apologized.has(picked.user.id)) {
+      apologized.add(picked.user.id);
+      await addComment(newsId, picked.user.id, failure.text, true, {
+        isError: true,
+        logEntryId: result.entry?.id ?? null,
+        error: {
+          code: failure.code,
+          message: failure.message,
+          attempts: failure.attempts
+        }
+      });
+    }
   }
 }
 
@@ -324,43 +626,60 @@ async function startDiscussion(newsId) {
     return { ok: true, alreadyRunning: true, aiParticipants: aiUsers.length };
   }
 
+  // Restarting must not look like a silent no-op: say exactly why nobody can
+  // speak instead of starting and finishing a discussion in the same tick.
+  const allExhausted = aiUsers.every(user => {
+    const settings = normalizeDiscussionSettings(user);
+    return messageCountFor(newsId, user.id) >= settings.maxMessagesPerNews;
+  });
+  if (allExhausted) {
+    return {
+      ok: false,
+      status: 409,
+      code: 'message_limit_reached',
+      error:
+        'Every AI already reached its "Max messages per news" limit on this news item. Raise that number under Users → Edit to continue the discussion.'
+    };
+  }
+
   const discussion = {
     active: true,
-    interval: null,
-    busy: false,
-    startedAt: new Date().toISOString()
+    startedAt: new Date().toISOString(),
+    stoppedReason: null,
+    // Memory-only per-discussion state for the runner.
+    cooldowns: new Map(),
+    apologies: new Set()
   };
   storage.discussions.set(newsId, discussion);
   broadcast('discussion_status', { newsId, active: true });
 
-  reactToNews(newsId, news, aiUsers).catch(error =>
-    console.error(`Initial AI reactions failed for ${newsId}:`, error.message)
-  );
-
-  discussion.interval = setInterval(() => {
-    const current = storage.discussions.get(newsId);
-    if (!current?.active) {
-      clearInterval(discussion.interval);
-      return;
-    }
-    continueDiscussion(newsId);
-  }, DISCUSSION_INTERVAL_MS);
+  discussion.runner = runDiscussion(newsId, news).catch(error => {
+    console.error(`Discussion runner failed for ${newsId}:`, error.message);
+    finishDiscussion(newsId, 'error');
+  });
 
   return { ok: true, aiParticipants: aiUsers.length };
 }
 
-// Stop AI discussion
+// Stop AI discussion (a user action, or the end of an exhausted discussion).
 function stopDiscussion(newsId) {
-  const discussion = storage.discussions.get(newsId);
-  if (discussion?.interval) {
-    clearInterval(discussion.interval);
-  }
-  storage.discussions.set(newsId, { active: false, interval: null, busy: false });
-  broadcast('discussion_status', { newsId, active: false });
+  if (typeof newsId !== 'string' || !newsId.trim()) return;
+  const discussion = storage.discussions.get(newsId) || {};
+  storage.discussions.set(newsId, {
+    ...discussion,
+    active: false,
+    stoppedReason: 'stopped',
+    stoppedAt: new Date().toISOString()
+  });
+  broadcast('discussion_status', { newsId, active: false, reason: 'stopped' });
 }
 
-// Add comment (user or AI)
-async function addComment(newsId, userId, text, isAI = false) {
+// Add comment (user or AI). An empty model answer never becomes a comment.
+// `extra` links the comment to its Meterless log entry and, for an error
+// notice, carries the machine-readable failure the UI expands on demand.
+async function addComment(newsId, userId, text, isAI = false, extra = {}) {
+  if (typeof text !== 'string' || !text.trim()) return null;
+
   const user = storage.users.find(u => u.id === userId);
   if (!user) return null;
 
@@ -373,6 +692,16 @@ async function addComment(newsId, userId, text, isAI = false) {
     isAI,
     timestamp: new Date().toISOString()
   };
+
+  if (Number.isInteger(extra.logEntryId)) comment.logEntryId = extra.logEntryId;
+  if (extra.isError) comment.isError = true;
+  if (extra.error && typeof extra.error === 'object') {
+    comment.error = {
+      code: typeof extra.error.code === 'string' ? extra.error.code : 'error',
+      message: typeof extra.error.message === 'string' ? extra.error.message : '',
+      attempts: Number.isInteger(extra.error.attempts) ? extra.error.attempts : null
+    };
+  }
 
   storage.comments.push(comment);
   persist();
@@ -526,9 +855,21 @@ app.delete('/api/rss-sources/:id', (req, res) => {
 });
 
 // Users (AI Personalities)
+// Legacy users saved before the discussion settings existed are answered with
+// the defaults filled in, so the client never has to guess.
 app.get('/api/users', (req, res) => {
-  res.json(storage.users);
+  res.json(
+    storage.users.map(user =>
+      user.isAI === false ? user : { ...user, ...normalizeDiscussionSettings(user) }
+    )
+  );
 });
+
+// "Who am I?" — the archetype the model is told to be, e.g.
+// "The Workaholic (The Career-driven Professional)".
+function readRole(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 200) : '';
+}
 
 app.post('/api/users', (req, res) => {
   const { name, modelName, personality, isAI = true } = req.body;
@@ -539,13 +880,46 @@ app.post('/api/users', (req, res) => {
   const user = {
     id: randomUUID(),
     name,
+    role: readRole(req.body.role),
     modelName,
     personality,
     isAI,
+    ...normalizeDiscussionSettings(req.body),
     createdAt: new Date().toISOString()
   };
 
   storage.users.push(user);
+  persist();
+  res.json(user);
+});
+
+// Edit an existing personality, including its discussion settings.
+app.put('/api/users/:id', (req, res) => {
+  const user = storage.users.find(u => u.id === req.params.id);
+  if (!user) return res.status(404).json({ error: 'Not found' });
+
+  const body = req.body || {};
+  if (typeof body.name === 'string' && body.name.trim()) {
+    user.name = body.name.trim().slice(0, 80);
+  }
+  if (typeof body.role === 'string') {
+    user.role = readRole(body.role);
+  }
+  if (typeof body.modelName === 'string' && body.modelName.trim()) {
+    user.modelName = body.modelName.trim().slice(0, 120);
+  }
+  if (typeof body.personality === 'string' && body.personality.trim()) {
+    user.personality = body.personality.trim().slice(0, 4000);
+  }
+  if (typeof body.isAI === 'boolean') {
+    user.isAI = body.isAI;
+  }
+  if (user.isAI !== false) {
+    // Merge, so a partial settings update keeps every value it did not send.
+    Object.assign(user, normalizeDiscussionSettings({ ...user, ...body }));
+  }
+  user.updatedAt = new Date().toISOString();
+
   persist();
   res.json(user);
 });
@@ -577,7 +951,7 @@ app.get('/api/news/:id', (req, res) => {
   const comments = storage.comments
     .filter(c => c.newsId === news.id)
     .map(comment =>
-      comment.isAI
+      comment.isAI && !comment.isError
         ? {
             ...comment,
             text:
@@ -588,14 +962,19 @@ app.get('/api/news/:id', (req, res) => {
     );
   const discussion = storage.discussions.get(news.id);
 
-  res.json({ ...news, comments, discussionActive: discussion?.active || false });
+  res.json({
+    ...news,
+    comments,
+    discussionActive: discussion?.active || false,
+    discussionStoppedReason: discussion?.stoppedReason || null
+  });
 });
 
 // Comments
 app.post('/api/comments', async (req, res) => {
   const { newsId, userId, text } = req.body;
-  if (!newsId || !text) {
-    return res.status(400).json({ error: 'newsId and text are required' });
+  if (!newsId || typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'newsId and a non-empty text are required' });
   }
   const comment = await addComment(newsId, userId || storage.participantId, text, false);
   if (!comment) return res.status(400).json({ error: 'Invalid user' });

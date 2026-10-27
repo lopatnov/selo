@@ -3,13 +3,17 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 
 import API_BASE from '../api';
+import { DEFAULT_DISCUSSION_SETTINGS, toDiscussionPayload } from '../discussionSettings';
+import DiscussionSettingsFields from './DiscussionSettingsFields';
 
 function AddUser() {
   const navigate = useNavigate();
   const [name, setName] = useState('');
+  const [role, setRole] = useState('');
   const [modelName, setModelName] = useState('meterless/auto');
   const [personality, setPersonality] = useState('');
   const [isAI, setIsAI] = useState(true);
+  const [settings, setSettings] = useState({ ...DEFAULT_DISCUSSION_SETTINGS });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [models, setModels] = useState([]);
@@ -36,7 +40,14 @@ function AddUser() {
     setLoading(true);
 
     try {
-      await axios.post(`${API_BASE}/users`, { name, modelName, personality, isAI });
+      await axios.post(`${API_BASE}/users`, {
+        name,
+        role,
+        modelName,
+        personality,
+        isAI,
+        ...toDiscussionPayload(settings)
+      });
       navigate('/users');
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to add user');
@@ -62,6 +73,21 @@ function AddUser() {
             placeholder="e.g., Alex, CriticBot, OptimistAI"
             required
           />
+        </div>
+
+        <div className="form-group">
+          <label htmlFor="role">Who am I?</label>
+          <input
+            type="text"
+            id="role"
+            value={role}
+            onChange={(e) => setRole(e.target.value)}
+            placeholder="e.g., The Workaholic (The Career-driven Professional)"
+          />
+          <small className="provider-hint">
+            The archetype the model is told to be. Without it the model only sees the name and the
+            description below.
+          </small>
         </div>
 
         <div className="form-group">
@@ -105,6 +131,14 @@ function AddUser() {
             <span>This is an AI personality (participates in auto-discussions)</span>
           </label>
         </div>
+
+        {isAI && (
+          <DiscussionSettingsFields
+            settings={settings}
+            onChange={setSettings}
+            idPrefix="add-user"
+          />
+        )}
 
         <div className="form-actions">
           <button type="submit" className="btn btn-primary" disabled={loading}>

@@ -383,6 +383,55 @@ body {
   line-height: 1.6;
 }
 
+.comment.error {
+  background: #fff6f6;
+  border-left-color: #e74c3c;
+}
+
+.comment-details-toggle {
+  margin-top: 0.5rem;
+  padding: 0.2rem 0.55rem;
+  border: 1px solid #cfd9e3;
+  border-radius: 4px;
+  background: #f7fafc;
+  color: #2c3e50;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.comment-details-toggle:hover {
+  background: #eef4fa;
+  border-color: #3498db;
+}
+
+.comment-details {
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  background: #fbfdff;
+  border: 1px solid #e3edf7;
+  border-radius: 4px;
+}
+
+.comment-details .provider-output {
+  margin-bottom: 0.75rem;
+}
+
+.comment-details-note {
+  font-size: 0.82rem;
+  color: #7f8c8d;
+  font-style: italic;
+}
+
+.comment-error {
+  font-size: 0.82rem;
+  color: #a33125;
+  background: #fdecea;
+  border-radius: 3px;
+  padding: 0.5rem 0.65rem;
+  margin-bottom: 0.6rem;
+  word-break: break-word;
+}
+
 .add-comment-form {
   padding: 1rem 1.25rem;
   border-top: 1px solid #eee;
@@ -429,6 +478,13 @@ body {
   margin-bottom: 0.25rem;
 }
 
+.user-role {
+  font-size: 0.85rem;
+  color: #8e44ad;
+  font-weight: 500;
+  margin-bottom: 0.25rem;
+}
+
 .user-model {
   font-size: 0.85rem;
   color: #3498db;
@@ -442,10 +498,53 @@ body {
   line-height: 1.5;
 }
 
+.user-settings-summary {
+  margin-top: 0.75rem;
+  padding: 0.5rem 0.75rem;
+  background: #f4f8fc;
+  border-left: 3px solid #3498db;
+  border-radius: 3px;
+  font-size: 0.8rem;
+  color: #2c3e50;
+}
+
 .user-actions {
   margin-top: 1rem;
   display: flex;
   gap: 0.5rem;
+}
+
+/* Per-AI discussion settings */
+.discussion-settings {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid #dbe6f1;
+  border-radius: 6px;
+  background: #fafcff;
+}
+
+.discussion-settings legend {
+  padding: 0 0.4rem;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: #2c3e50;
+}
+
+.discussion-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #2c3e50;
+  cursor: pointer;
+}
+
+.discussion-settings .form-row {
+  margin-top: 0.75rem;
+}
+
+.discussion-settings .provider-hint {
+  margin-top: 0.25rem;
 }
 
 /* Forms */

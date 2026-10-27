@@ -5,15 +5,28 @@ import { Link } from 'react-router-dom';
 import API_BASE, { WS_URL, getParticipant } from '../api';
 import MeterlessLogPanel from './MeterlessLogPanel';
 
+const DISCUSSION_STOP_REASONS = {
+  stopped: 'Discussion stopped.',
+  max_messages: 'Discussion finished: every AI reached its per-news message limit.',
+  ai_unavailable: 'Discussion stopped: the AI provider returned no answer three times in a row.',
+  no_ai_users: 'Discussion stopped: no AI personalities are configured.',
+  error: 'Discussion stopped after an internal error. Check the server log.'
+};
+
 function NewsFeed() {
   const [news, setNews] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedNews, setExpandedNews] = useState(null);
   const [comments, setComments] = useState({});
   const [discussionActive, setDiscussionActive] = useState({});
+  const [discussionReason, setDiscussionReason] = useState({});
   const [discussionError, setDiscussionError] = useState({});
   const [startingDiscussion, setStartingDiscussion] = useState({});
   const [logOpen, setLogOpen] = useState({});
+  const [logEntries, setLogEntries] = useState({});
+  const [commentDetails, setCommentDetails] = useState({});
+  const [detailsLoading, setDetailsLoading] = useState({});
+  const [detailsError, setDetailsError] = useState({});
   const [newCommentText, setNewCommentText] = useState('');
   const [participant, setParticipant] = useState(null);
   const wsRef = useRef(null);
@@ -65,16 +78,25 @@ function NewsFeed() {
             setNews(data);
             break;
           case 'new_comment':
-            setComments(prev => ({
-              ...prev,
-              [data.newsId]: [...(prev[data.newsId] || []), data]
-            }));
+            setComments(prev => {
+              const thread = prev[data.newsId] || [];
+              // The REST fetch and the WebSocket can deliver the same comment;
+              // keep one copy so the thread never shows duplicates.
+              if (thread.some(comment => comment.id === data.id)) {
+                return prev;
+              }
+              return { ...prev, [data.newsId]: [...thread, data] };
+            });
             scrollToBottom();
             break;
           case 'discussion_status':
             setDiscussionActive(prev => ({
               ...prev,
               [data.newsId]: data.active
+            }));
+            setDiscussionReason(prev => ({
+              ...prev,
+              [data.newsId]: data.active ? '' : data.reason || ''
             }));
             break;
         }
@@ -107,6 +129,12 @@ function NewsFeed() {
       const response = await axios.get(`${API_BASE}/news/${newsId}`);
       setComments(prev => ({ ...prev, [newsId]: response.data.comments || [] }));
       setDiscussionActive(prev => ({ ...prev, [newsId]: response.data.discussionActive || false }));
+      setDiscussionReason(prev => ({
+        ...prev,
+        [newsId]: response.data.discussionActive
+          ? ''
+          : response.data.discussionStoppedReason || ''
+      }));
     } catch (error) {
       console.error('Failed to fetch news details:', error);
     }
@@ -118,6 +146,7 @@ function NewsFeed() {
   const handleStartDiscussion = async (newsId) => {
     setStartingDiscussion(prev => ({ ...prev, [newsId]: true }));
     setDiscussionError(prev => ({ ...prev, [newsId]: '' }));
+    setDiscussionReason(prev => ({ ...prev, [newsId]: '' }));
 
     try {
       const { data } = await axios.post(`${API_BASE}/discussion/start`, { newsId });
@@ -158,6 +187,33 @@ function NewsFeed() {
     } catch (error) {
       console.error('Failed to add comment:', error);
       alert(error.response?.data?.error || 'Failed to add comment.');
+    }
+  };
+
+  // Ask / thinking behind one AI comment is fetched on demand: the log entry
+  // holds the whole prompt, and the comment already shows the answer.
+  const handleToggleCommentDetails = async (newsId, comment) => {
+    const isOpen = Boolean(commentDetails[comment.id]);
+    setCommentDetails(prev => ({ ...prev, [comment.id]: !isOpen }));
+    if (isOpen || !comment.logEntryId) return;
+
+    const known = (logEntries[newsId] || []).find(entry => entry.id === comment.logEntryId);
+    if (known) return;
+
+    setDetailsLoading(prev => ({ ...prev, [comment.id]: true }));
+    setDetailsError(prev => ({ ...prev, [comment.id]: '' }));
+    try {
+      const { data } = await axios.get(`${API_BASE}/meterless/log`, { params: { newsId } });
+      const list = Array.isArray(data.entries) ? data.entries : [];
+      setLogEntries(prev => ({ ...prev, [newsId]: list }));
+    } catch (error) {
+      setDetailsError(prev => ({
+        ...prev,
+        [comment.id]:
+          error.response?.data?.error || error.message || 'Failed to load the prompt and thinking.'
+      }));
+    } finally {
+      setDetailsLoading(prev => ({ ...prev, [comment.id]: false }));
     }
   };
 
@@ -245,6 +301,17 @@ function NewsFeed() {
                   </div>
                 )}
 
+                {!discussionActive[item.id] && discussionReason[item.id] && (
+                  <div
+                    className="provider-alert warning"
+                    style={{ margin: '0 1.25rem 1rem' }}
+                    data-testid={`discussion-reason-${item.id}`}
+                  >
+                    {DISCUSSION_STOP_REASONS[discussionReason[item.id]] ||
+                      DISCUSSION_STOP_REASONS.stopped}
+                  </div>
+                )}
+
                 <div className="discussion-panel">
                   <div className="discussion-header">
                     <h4 style={{ margin: 0 }}>💬 Discussion ({comments[item.id]?.length || 0})</h4>
@@ -262,22 +329,88 @@ function NewsFeed() {
                   
                   <div className="discussion-comments">
                     {comments[item.id]?.length > 0 ? (
-                      comments[item.id].map(comment => (
-                        <div key={comment.id} className={`comment ${comment.isAI ? 'ai' : 'user'}`}>
-                          <div className="comment-header">
-                            <span className={`comment-author ${comment.isAI ? 'ai' : 'user'}`}>
-                              {comment.userName} {comment.isAI ? '🤖' : '👤'}
-                            </span>
-                            <span className={`comment-badge ${comment.isAI ? 'ai' : 'user'}`}>
-                              {comment.isAI ? 'AI' : 'User'}
-                            </span>
-                            <span className="comment-time">
-                              {formatDate(comment.timestamp)}
-                            </span>
+                      comments[item.id].map(comment => {
+                        const entry =
+                          (logEntries[item.id] || []).find(item2 => item2.id === comment.logEntryId) ||
+                          null;
+                        const canOpen = Boolean(comment.logEntryId) || Boolean(comment.error);
+
+                        return (
+                          <div
+                            key={comment.id}
+                            className={`comment ${comment.isAI ? 'ai' : 'user'}${
+                              comment.error ? ' error' : ''
+                            }`}
+                          >
+                            <div className="comment-header">
+                              <span className={`comment-author ${comment.isAI ? 'ai' : 'user'}`}>
+                                {comment.userName} {comment.isAI ? '🤖' : '👤'}
+                              </span>
+                              <span className={`comment-badge ${comment.isAI ? 'ai' : 'user'}`}>
+                                {comment.isAI ? 'AI' : 'User'}
+                              </span>
+                              <span className="comment-time">
+                                {formatDate(comment.timestamp)}
+                              </span>
+                            </div>
+                            <div className="comment-text">{comment.text}</div>
+
+                            {canOpen && (
+                              <button
+                                type="button"
+                                className="comment-details-toggle"
+                                onClick={() => handleToggleCommentDetails(item.id, comment)}
+                                aria-expanded={Boolean(commentDetails[comment.id])}
+                              >
+                                {comment.error ? '⚠ Error details' : '🔎 Ask & thinking'}
+                              </button>
+                            )}
+
+                            {commentDetails[comment.id] && (
+                              <div className="comment-details">
+                                {comment.error && (
+                                  <div className="comment-error">
+                                    <strong>{comment.error.code || 'error'}</strong>
+                                    {comment.error.message ? `: ${comment.error.message}` : ''}
+                                    {comment.error.attempts
+                                      ? ` · ${comment.error.attempts} attempt(s)`
+                                      : ''}
+                                  </div>
+                                )}
+                                {detailsError[comment.id] && (
+                                  <div className="comment-error">{detailsError[comment.id]}</div>
+                                )}
+                                {detailsLoading[comment.id] && (
+                                  <div className="comment-details-note">Loading the prompt…</div>
+                                )}
+                                {!detailsLoading[comment.id] &&
+                                  comment.logEntryId &&
+                                  !entry &&
+                                  !detailsError[comment.id] && (
+                                    <div className="comment-details-note">
+                                      No Meterless log entry is available for this comment anymore.
+                                    </div>
+                                  )}
+                                {entry && (
+                                  <>
+                                    <div className="provider-output-label">
+                                      Ask — exactly what the model received
+                                    </div>
+                                    <pre className="provider-output">{entry.ask || '(empty)'}</pre>
+                                    <div className="provider-output-label">Thinking</div>
+                                    <pre className="provider-output">
+                                      {entry.think || '(no reasoning returned)'}
+                                    </pre>
+                                    <div className="provider-output-label">
+                                      Answer — shown as the comment above
+                                    </div>
+                                  </>
+                                )}
+                              </div>
+                            )}
                           </div>
-                          <div className="comment-text">{comment.text}</div>
-                        </div>
-                      ))
+                        );
+                      })
                     ) : (
                       <div className="no-comments">No comments yet. Start a discussion or add your comment!</div>
                     )}
