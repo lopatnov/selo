@@ -425,6 +425,39 @@ test('getConfig reports whether the base URL came from settings, env or the defa
   assert.equal(fromSettings.runtime.getConfig().baseUrlSource, 'settings');
 });
 
+test('chatDetailed keeps reasoning_content out of the answer and chat stays a string', async () => {
+  const { runtime } = makeRuntime({
+    token: 'rt-good',
+    fetchImpl: async () =>
+      jsonResponse(200, {
+        choices: [
+          {
+            message: {
+              content: 'A buyout offer would just be a distraction.',
+              reasoning_content: 'Let me craft a concise reaction.'
+            }
+          }
+        ]
+      })
+  });
+
+  const detailed = await runtime.chatDetailed({
+    model: 'meterless/auto',
+    messages: [{ role: 'user', content: 'React to the news' }]
+  });
+
+  assert.equal(detailed.content, 'A buyout offer would just be a distraction.');
+  assert.equal(detailed.reasoning, 'Let me craft a concise reaction.');
+  assert.equal(detailed.model, 'meterless/auto');
+  assert.equal(typeof detailed.durationMs, 'number');
+
+  const plain = await runtime.chat({
+    model: 'meterless/auto',
+    messages: [{ role: 'user', content: 'React to the news' }]
+  });
+  assert.equal(plain, 'A buyout offer would just be a distraction.');
+});
+
 test('connect persists the base URL and token so a fresh process still sees them', () => {
   const dir = tempDir();
   const store = new SettingsStore(path.join(dir, 'settings.json'));

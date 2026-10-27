@@ -12,6 +12,8 @@ const { meterlessCloud, meterlessRuntime, providers } = require('./providers');
 const { createProvidersRouter } = require('./providers/routes');
 const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
+const { sanitizeModelText } = require('./meterless-text');
+const { createMeterlessLog } = require('./meterless-log');
 
 const app = express();
 const server = http.createServer(app);
@@ -43,6 +45,8 @@ const zetaris = createZetaris();
 // volume in Docker), so RSS sources, AI personalities, news and comments
 // survive a restart. SELO_STATE_FILE overrides the path.
 const stateStore = createStateStore();
+// ask / think / answer records for every Meterless call, newest first.
+const meterlessLog = createMeterlessLog({ limit: 200 });
 
 const storage = {
   rssSources: [],
@@ -97,31 +101,92 @@ function ensureParticipant() {
 // RSS Parser
 const parser = new Parser();
 
+// Every Meterless call is recorded as ask → think → answer, printed to the
+// console and kept in memory so the UI can show exactly the same three parts.
+function logMeterlessCall(entry) {
+  const errorLine = entry.error ? ` · ERROR: ${entry.error}` : '';
+  console.log(
+    [
+      `[Meterless] #${entry.id} · ${entry.model} · ${entry.userName || 'unknown user'} · ${entry.durationMs} ms${errorLine}`,
+      '--- ask ---',
+      entry.ask || '(empty)',
+      '--- think ---',
+      entry.think || '(no reasoning returned)',
+      '--- answer ---',
+      entry.answer || '(no answer)'
+    ].join('\n')
+  );
+}
+
 // Helper: Call Meterless AI.
 // `meterless/<routing-mode>` ids go to the local Meterless Runtime provider;
 // every other model id keeps using the existing hosted endpoint.
-async function callMeterlessAI(modelName, prompt, personality) {
-  const systemPrompt = `You are an AI with the following personality: ${personality}.
+// Returns { answer, think, entry }: `answer` is sanitised text safe to post,
+// `think` is the reasoning that must never become a comment.
+async function callMeterlessAI({ newsId = null, user, prompt }) {
+  const model =
+    typeof user?.modelName === 'string' && user.modelName.trim()
+      ? user.modelName.trim()
+      : 'meterless/auto';
+  const systemPrompt = `You are an AI with the following personality: ${user?.personality || 'AI participant'}.
   You are discussing a news article and comments. Keep responses concise (2-3 sentences max).
-  React naturally to both the news content and other comments.`;
+  React naturally to both the news content and other comments.
+  Reply with the reaction only: no analysis, no reasoning, no <think> tags and no comments about these instructions.`;
 
-  const model = typeof modelName === 'string' && modelName.trim() ? modelName.trim() : 'meterless/auto';
   const messages = [
     { role: 'system', content: systemPrompt },
     { role: 'user', content: prompt }
   ];
 
+  const startedAt = Date.now();
+  const record = {
+    newsId,
+    userName: user?.name || '',
+    model,
+    ask: `[system]\n${systemPrompt}\n\n[user]\n${prompt}`
+  };
+
   try {
-    if (model.startsWith('meterless/')) {
-      return await meterlessRuntime.chat({ model, messages, max_tokens: 150, temperature: 0.8 });
-    }
-    return await meterlessCloud.chat({ model, messages, max_tokens: 150, temperature: 0.8 });
+    const provider = model.startsWith('meterless/') ? meterlessRuntime : meterlessCloud;
+    const result = await provider.chatDetailed({ model, messages, max_tokens: 150, temperature: 0.8 });
+
+    // Reasoning may come as a separate field and/or inline in the content.
+    const { think, answer } = sanitizeModelText(result?.content);
+    const reasoning = [result?.reasoning, think]
+      .map(part => (typeof part === 'string' ? part.trim() : ''))
+      .filter(Boolean)
+      .join('\n\n');
+
+    const entry = meterlessLog.push({
+      ...record,
+      think: reasoning,
+      answer,
+      durationMs: Date.now() - startedAt,
+      error: answer ? null : 'The model returned reasoning only; there was no answer to post.'
+    });
+    logMeterlessCall(entry);
+
+    return { answer, think: reasoning, entry };
   } catch (error) {
+    const entry = meterlessLog.push({
+      ...record,
+      think: '',
+      answer: '',
+      durationMs: Date.now() - startedAt,
+      error: error?.message || 'Meterless request failed.'
+    });
+    logMeterlessCall(entry);
     // Never log the token or a connect link. Only the safe error message.
     console.error(`Meterless request failed (${error.code || 'error'}): ${error.message}`);
-    return error.code === 'unauthorized'
-      ? '[Meterless rejected the token. Open AI Provider settings and check the token.]'
-      : `[AI Error: ${error.message}]`;
+
+    return {
+      answer:
+        error.code === 'unauthorized'
+          ? '[Meterless rejected the token. Open AI Provider settings and check the token.]'
+          : `[AI Error: ${error.message}]`,
+      think: '',
+      entry
+    };
   }
 }
 
@@ -149,11 +214,22 @@ wss.on('connection', (ws) => {
   });
 });
 
+const DISCUSSION_INTERVAL_MS = 30000;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// AI users only: the local human participant (isAI: false, modelName: "human")
+// never posts AI replies.
+function aiParticipants() {
+  return storage.users.filter(user => user.isAI !== false && user.modelName !== 'human');
+}
+
 async function handleWebSocketMessage(ws, type, data) {
   switch (type) {
-    case 'start_discussion':
-      await startDiscussion(data.newsId);
+    case 'start_discussion': {
+      const result = await startDiscussion(data?.newsId);
+      if (!result.ok) console.warn(`WebSocket start_discussion refused: ${result.error}`);
       break;
+    }
     case 'stop_discussion':
       stopDiscussion(data.newsId);
       break;
@@ -163,59 +239,114 @@ async function handleWebSocketMessage(ws, type, data) {
   }
 }
 
-// Start AI discussion for a news item
-async function startDiscussion(newsId) {
-  const news = storage.news.find(n => n.id === newsId);
-  if (!news) return;
-
-  const discussion = storage.discussions.get(newsId);
-  if (discussion?.active) return;
-
-  storage.discussions.set(newsId, { active: true, interval: null });
-  broadcast('discussion_status', { newsId, active: true });
-
-  const aiUsers = storage.users.filter(user => user.isAI !== false);
-
-  // Initial AI responses to the news
+// Initial AI reactions to a news item. Runs in the background: a cold routing
+// mode can take minutes, so the HTTP request must never wait for it.
+async function reactToNews(newsId, news, aiUsers) {
   for (const user of aiUsers) {
-    const prompt = `News: "${news.title}"\n${news.content}\n\nReact to this news as ${user.name} (${user.modelName}).`;
-    const response = await callMeterlessAI(user.modelName, prompt, user.personality);
+    const discussion = storage.discussions.get(newsId);
+    if (!discussion?.active) return;
 
-    await addComment(newsId, user.id, response, true);
+    const prompt = `News: "${news.title}"\n${news.content}\n\nReact to this news as ${user.name} (${user.modelName}).`;
+    const { answer } = await callMeterlessAI({ newsId, user, prompt });
+    if (answer) await addComment(newsId, user.id, answer, true);
 
     // Small delay between AI responses
-    await new Promise(r => setTimeout(r, 1000));
+    await sleep(1000);
   }
+}
 
-  // Continue discussion periodically
-  const interval = setInterval(async () => {
-    const activeDiscussion = storage.discussions.get(newsId);
-    if (!activeDiscussion?.active) {
-      clearInterval(interval);
-      return;
-    }
+// One follow-up reply per tick, based on the last few comments.
+async function continueDiscussion(newsId) {
+  const discussion = storage.discussions.get(newsId);
+  if (!discussion?.active || discussion.busy) return;
+  discussion.busy = true;
 
-    // Get recent comments for context
-    const recentComments = storage.comments
-      .filter(c => c.newsId === newsId)
-      .slice(-5);
-
+  try {
+    const recentComments = storage.comments.filter(c => c.newsId === newsId).slice(-5);
     if (recentComments.length === 0) return;
 
-    // Pick a random AI user to respond
-    const candidates = storage.users.filter(u => u.isAI !== false);
+    const candidates = aiParticipants();
     if (candidates.length === 0) return;
 
     const user = candidates[Math.floor(Math.random() * candidates.length)];
     const lastComment = recentComments[recentComments.length - 1];
 
-    const prompt = `Previous comment by ${lastComment.isAI ? 'AI' : 'User'} ${lastComment.userName}: "${lastComment.text}"\n\nRespond to this comment as ${user.name} (${user.modelName}).`;
-    const response = await callMeterlessAI(user.modelName, prompt, user.personality);
+    // A comment saved before the reasoning filter existed must not feed its
+    // chain of thought back into the next prompt.
+    const lastText = lastComment.isAI
+      ? sanitizeModelText(lastComment.text).answer || '(reasoning omitted)'
+      : lastComment.text;
 
-    await addComment(newsId, user.id, response, true);
-  }, 30000); // Every 30 seconds
+    const prompt = `Previous comment by ${lastComment.isAI ? 'AI' : 'User'} ${lastComment.userName}: "${lastText}"\n\nRespond to this comment as ${user.name} (${user.modelName}).`;
+    const { answer } = await callMeterlessAI({ newsId, user, prompt });
+    if (answer) await addComment(newsId, user.id, answer, true);
+  } catch (error) {
+    console.error(`Discussion loop failed for ${newsId}:`, error.message);
+  } finally {
+    const current = storage.discussions.get(newsId);
+    if (current) current.busy = false;
+  }
+}
 
-  storage.discussions.set(newsId, { active: true, interval });
+/**
+ * Start AI discussion for a news item.
+ * Returns { ok: true, aiParticipants } immediately, or a refusal with the HTTP
+ * status the route should use. Replies are broadcast over the WebSocket.
+ */
+async function startDiscussion(newsId) {
+  if (typeof newsId !== 'string' || !newsId.trim()) {
+    return { ok: false, status: 400, code: 'invalid_request', error: 'newsId is required.' };
+  }
+
+  const news = storage.news.find(n => n.id === newsId);
+  if (!news) {
+    return {
+      ok: false,
+      status: 404,
+      code: 'not_found',
+      error: 'That news item is no longer in the feed. Refresh the feed and try again.'
+    };
+  }
+
+  const aiUsers = aiParticipants();
+  if (aiUsers.length === 0) {
+    return {
+      ok: false,
+      status: 400,
+      code: 'no_ai_users',
+      error:
+        'No AI participants yet. Create an AI user under Users (with a personality and a meterless/* model), then start the discussion again.'
+    };
+  }
+
+  const existing = storage.discussions.get(newsId);
+  if (existing?.active) {
+    return { ok: true, alreadyRunning: true, aiParticipants: aiUsers.length };
+  }
+
+  const discussion = {
+    active: true,
+    interval: null,
+    busy: false,
+    startedAt: new Date().toISOString()
+  };
+  storage.discussions.set(newsId, discussion);
+  broadcast('discussion_status', { newsId, active: true });
+
+  reactToNews(newsId, news, aiUsers).catch(error =>
+    console.error(`Initial AI reactions failed for ${newsId}:`, error.message)
+  );
+
+  discussion.interval = setInterval(() => {
+    const current = storage.discussions.get(newsId);
+    if (!current?.active) {
+      clearInterval(discussion.interval);
+      return;
+    }
+    continueDiscussion(newsId);
+  }, DISCUSSION_INTERVAL_MS);
+
+  return { ok: true, aiParticipants: aiUsers.length };
 }
 
 // Stop AI discussion
@@ -224,7 +355,7 @@ function stopDiscussion(newsId) {
   if (discussion?.interval) {
     clearInterval(discussion.interval);
   }
-  storage.discussions.set(newsId, { active: false, interval: null });
+  storage.discussions.set(newsId, { active: false, interval: null, busy: false });
   broadcast('discussion_status', { newsId, active: false });
 }
 
@@ -441,7 +572,20 @@ app.get('/api/news/:id', (req, res) => {
   const news = storage.news.find(n => n.id === req.params.id);
   if (!news) return res.status(404).json({ error: 'Not found' });
 
-  const comments = storage.comments.filter(c => c.newsId === news.id);
+  // AI comments written before the reasoning filter existed are cleaned here too,
+  // so a previously leaked <think> block is never shown again.
+  const comments = storage.comments
+    .filter(c => c.newsId === news.id)
+    .map(comment =>
+      comment.isAI
+        ? {
+            ...comment,
+            text:
+              sanitizeModelText(comment.text).answer ||
+              '[The model returned reasoning only; there was no answer.]'
+          }
+        : comment
+    );
   const discussion = storage.discussions.get(news.id);
 
   res.json({ ...news, comments, discussionActive: discussion?.active || false });
@@ -459,13 +603,46 @@ app.post('/api/comments', async (req, res) => {
 });
 
 // Discussion control
+// Answers in milliseconds: the AI replies themselves are streamed over the
+// WebSocket, so a slow (cold) model can never make this call look like a
+// configuration error.
 app.post('/api/discussion/start', async (req, res) => {
-  await startDiscussion(req.body.newsId);
-  res.json({ success: true });
+  const result = await startDiscussion(req.body?.newsId);
+
+  if (!result.ok) {
+    return res.status(result.status).json({ error: result.error, code: result.code });
+  }
+
+  res.status(202).json({
+    success: true,
+    started: true,
+    alreadyRunning: Boolean(result.alreadyRunning),
+    aiParticipants: result.aiParticipants,
+    message: result.alreadyRunning
+      ? 'The discussion is already running.'
+      : `Discussion started. ${result.aiParticipants} AI participant(s) will answer over the WebSocket.`
+  });
 });
 
 app.post('/api/discussion/stop', (req, res) => {
-  stopDiscussion(req.body.newsId);
+  stopDiscussion(req.body?.newsId);
+  res.json({ success: true });
+});
+
+// Meterless request log: the same ask → think → answer view as the console.
+app.get('/api/meterless/log', (req, res) => {
+  const newsId = typeof req.query.newsId === 'string' && req.query.newsId ? req.query.newsId : null;
+  const limit = Number.parseInt(req.query.limit, 10);
+  const entries = meterlessLog.list({
+    newsId,
+    limit: Number.isInteger(limit) ? limit : null
+  });
+  res.json({ entries, total: entries.length });
+});
+
+app.delete('/api/meterless/log', (req, res) => {
+  const newsId = typeof req.query.newsId === 'string' && req.query.newsId ? req.query.newsId : null;
+  meterlessLog.clear({ newsId });
   res.json({ success: true });
 });
 

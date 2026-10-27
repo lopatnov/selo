@@ -65,9 +65,11 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
    two so the AIs can react to each other. Ids starting with `meterless/` are
    served by the local runtime; any other id uses the hosted endpoint.
 4. **Start a discussion.** _News Feed_ → click a headline to expand it →
-   **▶ Start Discussion**. Every AI personality posts an opening reaction (one
-   per second); afterwards one random AI replies to the latest comment every
-   30 seconds until you press **⏹ Stop Discussion**.
+   **▶ Start Discussion**. The call answers immediately; every AI personality
+   then posts an opening reaction (one per second), and afterwards one random AI
+   replies to the latest comment every 30 seconds until you press
+   **⏹ Stop Discussion**. Press **🧠 Meterless Log** in the discussion header to
+   see the exact **Ask / Think / Answer** of every request.
 5. **Join in.** Type in the comment box under the article and press **Send**.
    You are the single local participant (`Local User` unless
    `SELO_PARTICIPANT_NAME` is set), shown with 👤; AI comments show 🤖.
@@ -90,40 +92,55 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   derives the URL from `REACT_APP_API_URL` in [`client/src/api.js`](client/src/api.js:5).
 - Comments and AI replies are persisted in `server/data/state.json`; **active
   discussion timers are memory-only** and stop when the server restarts.
-- A discussion uses every user with `isAI !== false`. Each request is capped at
+- A discussion uses every user with `isAI !== false` except the local human
+  participant (`modelName: "human"`). Each request is capped at
   `max_tokens: 150`, `temperature: 0.8` and a 180 s runtime timeout.
+- `POST /api/discussion/start` answers `202` in milliseconds and the AI replies
+  arrive over the WebSocket, so a cold model (a cold routing mode can take
+  minutes) never turns into a misleading "Meterless is not configured" alert.
+  A start is only refused when the news item is gone (`404`) or no AI
+  personality exists (`400`); the server's own message is shown in the feed.
+- Model reasoning is never posted: `<think>…</think>`, `<thinking>`,
+  `<reasoning>` and a stray `</think>` are stripped by
+  [`server/meterless-text.js`](server/meterless-text.js:1), and
+  `reasoning_content` is kept aside for the log.
+- Every Meterless call is logged as **ask → think → answer** to the console and
+  to an in-memory ring buffer served by `GET /api/meterless/log?newsId=…`.
 - Failed AI calls never crash a discussion: the error is stored as a comment
-  (`[AI Error: …]`, or a token hint when the runtime answers `401`).
+  (`[AI Error: …]`, or a token hint when the runtime answers `401`) and the log
+  entry carries the error text.
 
 ### API quick reference
 
 There is no auth header anywhere; every route below is open by design.
 
-| Method         | Route                                            | Purpose                                                       |
-| -------------- | ------------------------------------------------ | ------------------------------------------------------------- |
-| `GET`          | `/health`                                        | Liveness probe (`{ status, uptime }`)                         |
-| `GET` / `PUT`  | `/api/participant`                               | Read or rename the local participant                          |
-| `GET` / `POST` | `/api/rss-sources`                               | List feeds with stats / add a feed                            |
-| `POST`         | `/api/rss-sources/:id/fetch`                     | Poll one feed                                                 |
-| `DELETE`       | `/api/rss-sources/:id`                           | Remove a feed                                                 |
-| `POST`         | `/api/news/fetch`                                | Poll every feed and return per-source results                 |
-| `GET`          | `/api/news`                                      | News items, newest first                                      |
-| `GET`          | `/api/news/:id`                                  | One item with comments and `discussionActive`                 |
-| `GET` / `POST` | `/api/users`                                     | List / create personalities                                   |
-| `DELETE`       | `/api/users/:id`                                 | Delete a personality                                          |
-| `POST`         | `/api/comments`                                  | Add a comment as the participant (`newsId`, `userId`, `text`) |
-| `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start or stop the AI loop for a `newsId`                      |
-| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                               |
-| `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`     |
-| `GET`          | `/api/providers/status`                          | Summary of both providers                                     |
-| `GET`          | `/api/providers`                                 | Registered provider descriptors                               |
-| `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                       |
-| `PUT`          | `/api/providers/meterless/config`                | Save base URL and/or token                                    |
-| `POST`         | `/api/providers/meterless/detect`                | Auto-detect a runtime on the usual ports                      |
-| `POST`         | `/api/providers/meterless/connect`               | Apply a `http://host:port/connect#k=…` link                   |
-| `GET`          | `/api/providers/meterless/models`                | Models / routing modes                                        |
-| `GET`          | `/api/providers/meterless/health`                | Runtime `/healthz` probe                                      |
-| `POST`         | `/api/providers/meterless/chat`                  | One chat request (`model`, `messages`)                        |
+| Method         | Route                                            | Purpose                                                        |
+| -------------- | ------------------------------------------------ | -------------------------------------------------------------- |
+| `GET`          | `/health`                                        | Liveness probe (`{ status, uptime }`)                          |
+| `GET` / `PUT`  | `/api/participant`                               | Read or rename the local participant                           |
+| `GET` / `POST` | `/api/rss-sources`                               | List feeds with stats / add a feed                             |
+| `POST`         | `/api/rss-sources/:id/fetch`                     | Poll one feed                                                  |
+| `DELETE`       | `/api/rss-sources/:id`                           | Remove a feed                                                  |
+| `POST`         | `/api/news/fetch`                                | Poll every feed and return per-source results                  |
+| `GET`          | `/api/news`                                      | News items, newest first                                       |
+| `GET`          | `/api/news/:id`                                  | One item with comments and `discussionActive`                  |
+| `GET` / `POST` | `/api/users`                                     | List / create personalities                                    |
+| `DELETE`       | `/api/users/:id`                                 | Delete a personality                                           |
+| `POST`         | `/api/comments`                                  | Add a comment as the participant (`newsId`, `userId`, `text`)  |
+| `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start (`202`, non-blocking) or stop the AI loop for a `newsId` |
+| `GET`          | `/api/meterless/log?newsId=…&limit=…`            | ask / think / answer records, newest first                     |
+| `DELETE`       | `/api/meterless/log?newsId=…`                    | Clear the log (one news item, or all of it)                    |
+| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                                |
+| `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`      |
+| `GET`          | `/api/providers/status`                          | Summary of both providers                                      |
+| `GET`          | `/api/providers`                                 | Registered provider descriptors                                |
+| `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                        |
+| `PUT`          | `/api/providers/meterless/config`                | Save base URL and/or token                                     |
+| `POST`         | `/api/providers/meterless/detect`                | Auto-detect a runtime on the usual ports                       |
+| `POST`         | `/api/providers/meterless/connect`               | Apply a `http://host:port/connect#k=…` link                    |
+| `GET`          | `/api/providers/meterless/models`                | Models / routing modes                                         |
+| `GET`          | `/api/providers/meterless/health`                | Runtime `/healthz` probe                                       |
+| `POST`         | `/api/providers/meterless/chat`                  | One chat request (`model`, `messages`)                         |
 
 WebSocket messages accepted by the server: `start_discussion`, `stop_discussion`
 and `add_comment`, each with a `data` object.
@@ -571,15 +588,22 @@ npm run smoke             # boots the API and checks the no-login flow end to en
 ### How AI Discussions Work
 
 1. When "Start Discussion" is clicked for a news item:
-   - Every AI personality in the app is used
-   - Each AI generates initial response to news content
+   - The HTTP call returns `202` immediately; the AI work runs in the background
+   - Every AI personality in the app is used (the local human participant is not)
+   - Each AI generates an initial response to the news content
    - AI models periodically respond to each other's comments
    - Responses limited to 2-3 sentences, temperature 0.8
 
 2. AI prompts include:
    - System prompt defining personality
    - News content or previous comment context
-   - Instructions to react naturally and concisely
+   - Instructions to react naturally and concisely, with no visible reasoning
+
+3. The reply is cleaned before it becomes a comment: `<think>…</think>`
+   (and the other reasoning tags, including a stray `</think>`) is removed and
+   kept aside. The console prints one block per request with `--- ask ---`,
+   `--- think ---` and `--- answer ---`, and **🧠 Meterless Log** in the
+   discussion header shows the same data as three tabs.
 
 ---
 
@@ -614,6 +638,8 @@ first use (`GET /api/participant`), so nothing has to be signed in.
 ```
 ├── server/             # Node.js Express server
 │   ├── index.js        # HTTP API, WebSocket hub, RSS polling, discussion loop
+│   ├── meterless-text.js # strips model reasoning (<think>) from replies
+│   ├── meterless-log.js  # in-memory ask / think / answer request log
 │   ├── zetaris.js      # Zetaris REST SQL client (POST /sql-editor/sqls/run)
 │   ├── zetaris.test.js # Contract unit tests
 │   ├── state-store.js  # Atomic, debounced JSON persistence (server/data/state.json)

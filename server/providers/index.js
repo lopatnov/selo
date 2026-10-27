@@ -37,7 +37,11 @@ function createMeterlessCloud() {
     };
   }
 
-  async function chat({ model, messages = [], ...options } = {}) {
+  /**
+   * Same contract as the runtime provider: the answer plus any reasoning the
+   * endpoint exposes separately, so it can be logged but never posted.
+   */
+  async function chatDetailed({ model, messages = [], ...options } = {}) {
     const key = apiKey();
     if (!key) {
       throw new ProviderError(
@@ -46,6 +50,7 @@ function createMeterlessCloud() {
       );
     }
 
+    const startedAt = Date.now();
     let response;
     try {
       response = await fetch(`${baseUrl()}/chat/completions`, {
@@ -86,10 +91,28 @@ function createMeterlessCloud() {
       });
     }
 
-    const content = data?.choices?.[0]?.message?.content;
+    const choice = data?.choices?.[0];
+    const message = choice?.message;
+    const content = message?.content;
     if (typeof content !== 'string') {
       throw new ProviderError('invalid_response', 'Meterless Cloud returned no text content.');
     }
+
+    const reasoning =
+      typeof message?.reasoning_content === 'string'
+        ? message.reasoning_content
+        : typeof message?.reasoning === 'string'
+          ? message.reasoning
+          : typeof choice?.reasoning_content === 'string'
+            ? choice.reasoning_content
+            : '';
+
+    return { content, reasoning, model, durationMs: Date.now() - startedAt };
+  }
+
+  /** The provider contract: a plain string answer. */
+  async function chat(options = {}) {
+    const { content } = await chatDetailed(options);
     return content;
   }
 
@@ -99,7 +122,8 @@ function createMeterlessCloud() {
     kind: 'openai-compatible',
     descriptor: getConfig,
     getConfig,
-    chat
+    chat,
+    chatDetailed
   };
 }
 

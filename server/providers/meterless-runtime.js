@@ -385,8 +385,14 @@ function createMeterlessRuntime(options = {}) {
     }
   }
 
-  async function chat({ model = 'meterless/auto', messages = [], ...chatOptions } = {}) {
+  /**
+   * Full chat call. Returns the answer plus any reasoning the runtime exposes
+   * separately (`reasoning_content`), so the caller can keep the chain of
+   * thought out of the posted text and still show it in the request log.
+   */
+  async function chatDetailed({ model = 'meterless/auto', messages = [], ...chatOptions } = {}) {
     const baseUrl = resolveBaseUrl();
+    const startedAt = Date.now();
     const body = {
       ...chatOptions,
       model,
@@ -436,11 +442,28 @@ function createMeterlessRuntime(options = {}) {
       });
     }
 
-    const content = data?.choices?.[0]?.message?.content;
+    const choice = data?.choices?.[0];
+    const message = choice?.message;
+    const content = message?.content;
     if (typeof content !== 'string') {
       throw new ProviderError('invalid_response', 'Meterless Runtime returned no text content.');
     }
 
+    const reasoning =
+      typeof message?.reasoning_content === 'string'
+        ? message.reasoning_content
+        : typeof message?.reasoning === 'string'
+          ? message.reasoning
+          : typeof choice?.reasoning_content === 'string'
+            ? choice.reasoning_content
+            : '';
+
+    return { content, reasoning, model, durationMs: Date.now() - startedAt };
+  }
+
+  /** The provider contract: a plain string answer. */
+  async function chat(options = {}) {
+    const { content } = await chatDetailed(options);
     return content;
   }
 
@@ -517,6 +540,7 @@ function createMeterlessRuntime(options = {}) {
     getStatus,
     listModels,
     chat,
+    chatDetailed,
     autoDetect,
     checkHealth,
     resolveToken,

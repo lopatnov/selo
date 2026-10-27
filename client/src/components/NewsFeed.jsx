@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import API_BASE, { WS_URL, getParticipant } from '../api';
+import MeterlessLogPanel from './MeterlessLogPanel';
 
 function NewsFeed() {
   const [news, setNews] = useState([]);
@@ -10,6 +11,9 @@ function NewsFeed() {
   const [expandedNews, setExpandedNews] = useState(null);
   const [comments, setComments] = useState({});
   const [discussionActive, setDiscussionActive] = useState({});
+  const [discussionError, setDiscussionError] = useState({});
+  const [startingDiscussion, setStartingDiscussion] = useState({});
+  const [logOpen, setLogOpen] = useState({});
   const [newCommentText, setNewCommentText] = useState('');
   const [participant, setParticipant] = useState(null);
   const wsRef = useRef(null);
@@ -108,12 +112,28 @@ function NewsFeed() {
     }
   };
 
+  // The server answers immediately (202) and streams the AI replies over the
+  // WebSocket, so a slow model never looks like a failure. Only a real refusal
+  // is shown here, with the server's own explanation.
   const handleStartDiscussion = async (newsId) => {
+    setStartingDiscussion(prev => ({ ...prev, [newsId]: true }));
+    setDiscussionError(prev => ({ ...prev, [newsId]: '' }));
+
     try {
-      await axios.post(`${API_BASE}/discussion/start`, { newsId });
+      const { data } = await axios.post(`${API_BASE}/discussion/start`, { newsId });
+      setDiscussionActive(prev => ({ ...prev, [newsId]: true }));
+      if (data?.message) console.info(data.message);
     } catch (error) {
       console.error('Failed to start discussion:', error);
-      alert('Failed to start discussion. Check if Meterless is configured.');
+      setDiscussionError(prev => ({
+        ...prev,
+        [newsId]:
+          error.response?.data?.error ||
+          error.message ||
+          'Failed to start the discussion. Please try again.'
+      }));
+    } finally {
+      setStartingDiscussion(prev => ({ ...prev, [newsId]: false }));
     }
   };
 
@@ -202,26 +222,43 @@ function NewsFeed() {
                   </span>
                   
                   {discussionActive[item.id] ? (
-                    <button 
-                      className="btn btn-danger" 
+                    <button
+                      className="btn btn-danger"
                       onClick={() => handleStopDiscussion(item.id)}
                     >
                       ⏹ Stop Discussion
                     </button>
                   ) : (
-                    <button 
-                      className="btn btn-success" 
+                    <button
+                      className="btn btn-success"
                       onClick={() => handleStartDiscussion(item.id)}
+                      disabled={Boolean(startingDiscussion[item.id])}
                     >
-                      ▶ Start Discussion
+                      {startingDiscussion[item.id] ? '⏳ Starting…' : '▶ Start Discussion'}
                     </button>
                   )}
                 </div>
 
+                {discussionError[item.id] && (
+                  <div className="provider-alert error" style={{ margin: '0 1.25rem 1rem' }}>
+                    {discussionError[item.id]}
+                  </div>
+                )}
+
                 <div className="discussion-panel">
                   <div className="discussion-header">
                     <h4 style={{ margin: 0 }}>💬 Discussion ({comments[item.id]?.length || 0})</h4>
+                    <button
+                      type="button"
+                      className={`btn ${logOpen[item.id] ? 'btn-primary' : 'btn-secondary'}`}
+                      onClick={() => setLogOpen(prev => ({ ...prev, [item.id]: !prev[item.id] }))}
+                      title="See the exact ask / think / answer of every Meterless request for this news item"
+                    >
+                      🧠 Meterless Log
+                    </button>
                   </div>
+
+                  {logOpen[item.id] && <MeterlessLogPanel newsId={item.id} />}
                   
                   <div className="discussion-comments">
                     {comments[item.id]?.length > 0 ? (
