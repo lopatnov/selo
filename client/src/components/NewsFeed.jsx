@@ -56,7 +56,7 @@ function AgentActivityLine({ agents, activity }) {
           className="agent-roster"
           title={roster.map(agent => `${agent.name} · ${agent.model}`).join('\n')}
         >
-          {roster.length} watching
+          &nbsp;{roster.length} watching
         </span>
       )}
     </span>
@@ -214,9 +214,21 @@ function NewsFeed() {
     }
   };
 
-  const scrollToBottom = () => {
+  // Only the `.discussion-comments` box should scroll, never the whole page.
+  // Auto-scroll on a new comment only when the reader is already near the
+  // bottom; otherwise leave the viewport alone so reading isn't interrupted.
+  const isNearBottom = () => {
+    const container = commentsEndRef.current?.parentElement;
+    if (!container) return true;
+    return container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+  };
+
+  const scrollToBottom = ({ force = false } = {}) => {
+    if (!force && !isNearBottom()) return;
+    const container = commentsEndRef.current?.parentElement;
+    if (!container) return;
     setTimeout(() => {
-      commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
     }, 100);
   };
 
@@ -309,7 +321,7 @@ function NewsFeed() {
           if (thread.some(comment => comment.id === data.id)) return prev;
           return { ...prev, [newsId]: [...thread, data] };
         });
-        scrollToBottom();
+        scrollToBottom({ force: true });
       }
     } catch (error) {
       console.error('Failed to add comment:', error);
