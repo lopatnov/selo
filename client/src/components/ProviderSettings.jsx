@@ -11,9 +11,22 @@ const STATUS_LABELS = {
   checking: 'Checking…'
 };
 
-const DEFAULT_MODELS = ['auto', 'fast', 'deep', 'cheap', 'local', 'fusion'].map(
-  disposition => `meterless/${disposition}`
-);
+const DEFAULT_TEST_MODEL = 'meterless/auto';
+
+function classStateColor(state) {
+  switch (state) {
+    case 'ready':
+      return '#27ae60';
+    case 'may_take_a_moment':
+      return '#f39c12';
+    case 'cloud':
+      return '#3498db';
+    case 'unavailable':
+      return '#bdc3c7';
+    default:
+      return '#95a5a6';
+  }
+}
 
 const TOKEN_SOURCE_LABELS = {
   env: 'environment',
@@ -48,14 +61,21 @@ function StatusBadge({ status, testId }) {
 function ProviderSettings() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState({ status: 'checking' });
-  const [models, setModels] = useState(DEFAULT_MODELS);
-  const [routingModes, setRoutingModes] = useState(DEFAULT_MODELS);
+  const [models, setModels] = useState([]);
+  const [routingModes, setRoutingModes] = useState([]);
   const [otherModels, setOtherModels] = useState([]);
+  const [classes, setClasses] = useState([]);
+  const [classesMeta, setClassesMeta] = useState({
+    source: 'loading',
+    status: 'unknown',
+    reason: '',
+    checkedAt: null
+  });
   const [modelsMeta, setModelsMeta] = useState({
-    source: 'defaults',
+    source: 'loading',
     status: 'checking',
     httpStatus: null,
-    total: DEFAULT_MODELS.length,
+    total: 0,
     checkedAt: null,
     reason: ''
   });
@@ -68,7 +88,7 @@ function ProviderSettings() {
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const [testModel, setTestModel] = useState('meterless/auto');
+  const [testModel, setTestModel] = useState(DEFAULT_TEST_MODEL);
   const [testPrompt, setTestPrompt] = useState('Say hello in one short sentence.');
   const [testResult, setTestResult] = useState('');
   const [testError, setTestError] = useState('');
@@ -88,8 +108,7 @@ function ProviderSettings() {
   const fetchModels = useCallback(async () => {
     try {
       const { data } = await axios.get(`${API_BASE}/providers/meterless/models`);
-      const runtimeModels = Array.isArray(data.models) ? data.models : [];
-      const list = runtimeModels.length > 0 ? runtimeModels : DEFAULT_MODELS;
+      const list = Array.isArray(data.models) ? data.models : [];
       const routing = Array.isArray(data.routingModes)
         ? data.routingModes
         : list.filter(model => model.startsWith('meterless/'));
@@ -108,18 +127,41 @@ function ProviderSettings() {
         checkedAt: data.checkedAt || null,
         reason: data.reason || ''
       });
-      setTestModel(current => (list.includes(current) ? current : list[0]));
+      setTestModel(current =>
+        list.length > 0 ? (list.includes(current) ? current : list[0]) : current
+      );
     } catch (err) {
-      setModels(DEFAULT_MODELS);
-      setRoutingModes(DEFAULT_MODELS);
+      setModels([]);
+      setRoutingModes([]);
       setOtherModels([]);
       setModelsMeta({
         source: 'defaults',
         status: 'offline',
         httpStatus: null,
-        total: DEFAULT_MODELS.length,
+        total: 0,
         checkedAt: null,
         reason: readError(err)
+      });
+    }
+  }, []);
+
+  const fetchClasses = useCallback(async () => {
+    try {
+      const { data } = await axios.get(`${API_BASE}/providers/meterless/classes`);
+      setClasses(Array.isArray(data.classes) ? data.classes : []);
+      setClassesMeta({
+        source: data.source || 'runtime',
+        status: data.status || 'unknown',
+        reason: data.reason || '',
+        checkedAt: data.checkedAt || null
+      });
+    } catch (err) {
+      setClasses([]);
+      setClassesMeta({
+        source: 'unsupported',
+        status: 'error',
+        reason: readError(err),
+        checkedAt: null
       });
     }
   }, []);
@@ -131,12 +173,13 @@ function ProviderSettings() {
       const { data } = await axios.get(`${API_BASE}/providers/meterless`);
       applyConfig(data);
       await fetchModels();
+      await fetchClasses();
     } catch (err) {
       setError(readError(err));
     } finally {
       setLoading(false);
     }
-  }, [applyConfig, fetchModels]);
+  }, [applyConfig, fetchModels, fetchClasses]);
 
   const loadZetaris = useCallback(async () => {
     setZetarisBusy('status');
@@ -471,7 +514,14 @@ function ProviderSettings() {
       <div className="card">
         <div className="card-header" style={{ paddingBottom: '0.5rem' }}>
           <h3 className="provider-section-title">Models / routing modes</h3>
-          <button type="button" className="btn btn-secondary" onClick={fetchModels}>
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => {
+              fetchModels();
+              fetchClasses();
+            }}
+          >
             Refresh
           </button>
         </div>
@@ -536,6 +586,49 @@ function ProviderSettings() {
               <div className="provider-models provider-models-secondary">
                 {otherModels.map(model => (
                   <span key={model} className="model-chip">{model}</span>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+
+        <div data-testid="classes-list" style={{ marginTop: '1rem' }}>
+          {classesMeta.source === 'unsupported' && (
+            <div className="provider-note">
+              This runtime does not report live class state via{' '}
+              <code>GET /v1/meterless/classes</code>
+              {classesMeta.reason ? ` — ${classesMeta.reason}` : ''}.
+            </div>
+          )}
+
+          {classes.length > 0 && (
+            <>
+              <div className="provider-output-label">Live class state ({classes.length})</div>
+              <div className="provider-models">
+                {classes.map(cls => (
+                  <span
+                    key={cls.id}
+                    className="model-chip"
+                    style={{ opacity: cls.state === 'unavailable' ? 0.55 : 1 }}
+                    title={
+                      cls.routes && cls.routes.length > 0
+                        ? `routes: ${cls.routes.join(', ')}`
+                        : undefined
+                    }
+                  >
+                    <span
+                      style={{
+                        display: 'inline-block',
+                        width: 8,
+                        height: 8,
+                        borderRadius: '50%',
+                        marginRight: 6,
+                        background: classStateColor(cls.state)
+                      }}
+                    />
+                    {cls.id} · {cls.label}
+                    {cls.why ? ` · ${cls.why}` : ''}
+                  </span>
                 ))}
               </div>
             </>

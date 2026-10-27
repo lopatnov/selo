@@ -111,6 +111,13 @@ function createProvidersRouter({ runtime, providers = [] }) {
   );
 
   router.get(
+    '/meterless/classes',
+    asyncRoute(async (req, res) => {
+      res.json(await runtime.listClasses());
+    })
+  );
+
+  router.get(
     '/meterless/health',
     asyncRoute(async (req, res) => {
       res.json(await runtime.checkHealth());

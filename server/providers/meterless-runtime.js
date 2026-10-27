@@ -27,6 +27,7 @@ const CHAT_TIMEOUT_MS = 180_000;
 const STATUS_TIMEOUT_MS = 15_000;
 const MODELS_TIMEOUT_MS = 20_000;
 const DETECT_TIMEOUT_MS = 2_500;
+const CLASSES_TIMEOUT_MS = 15_000;
 
 const KEY_TOKEN = 'meterless_runtime_token';
 const KEY_BASE_URL = 'meterless_base_url';
@@ -89,6 +90,78 @@ function splitModelIds(ids) {
     else otherModels.push(id);
   }
   return { routingModes, otherModels };
+}
+
+/**
+ * Map a raw class state to a stable { state, label } pair the UI can render.
+ * The runtime's vocabulary is wider than the four buckets the contract keeps:
+ * `starting`, `parked`, `declared` and `admittable` all mean "may take a moment".
+ */
+function normalizeClassState(value) {
+  const raw = String(value == null ? '' : value).toLowerCase();
+  if (raw === 'ready') return { state: 'ready', label: 'ready' };
+  if (['starting', 'parked', 'declared', 'admittable'].includes(raw)) {
+    return { state: 'may_take_a_moment', label: 'may take a moment' };
+  }
+  if (raw === 'cloud') return { state: 'cloud', label: 'leaves the machine' };
+  if (raw === 'unavailable') return { state: 'unavailable', label: 'unavailable' };
+  if (raw) return { state: raw, label: raw };
+  return { state: 'unknown', label: 'unknown' };
+}
+
+/**
+ * Parse GET /v1/meterless/classes. The contract accepts two shapes —
+ * `{classes: {<id>: {...}}}` and `{data: [{class, ...}]}` — plus a bare string
+ * state. Unknown shapes degrade to an empty list instead of throwing.
+ */
+function parseClasses(body) {
+  const classes = [];
+  let bareState = null;
+
+  const push = (entry, fallbackId) => {
+    if (!entry || typeof entry !== 'object') return;
+    const id =
+      typeof entry.id === 'string'
+        ? entry.id
+        : typeof entry.class === 'string'
+          ? entry.class
+          : fallbackId || 'unknown';
+    const mapped = normalizeClassState(entry.state);
+    classes.push({
+      id,
+      state: mapped.state,
+      label: mapped.label,
+      why:
+        typeof entry.why === 'string'
+          ? entry.why
+          : typeof entry.reason === 'string'
+            ? entry.reason
+            : '',
+      chatCarrier:
+        entry.chat_carrier !== undefined
+          ? Boolean(entry.chat_carrier)
+          : entry.chatCarrier !== undefined
+            ? Boolean(entry.chatCarrier)
+            : null,
+      routes: Array.isArray(entry.routes) ? entry.routes : []
+    });
+  };
+
+  if (typeof body === 'string') {
+    bareState = body;
+  } else if (body && typeof body === 'object') {
+    if (typeof body.classes === 'string') {
+      bareState = body.classes;
+    } else if (body.classes && typeof body.classes === 'object' && !Array.isArray(body.classes)) {
+      for (const [id, entry] of Object.entries(body.classes)) {
+        push(entry && typeof entry === 'object' ? entry : { state: entry }, id);
+      }
+    } else if (Array.isArray(body.data)) {
+      for (const entry of body.data) push(entry);
+    }
+  }
+
+  return { classes, bareState };
 }
 
 function createMeterlessRuntime(options = {}) {
@@ -249,11 +322,11 @@ function createMeterlessRuntime(options = {}) {
     return { response, body };
   }
 
-  function describeFailure(error) {
+  function describeFailure(error, endpoint = '/v1/models') {
     if (error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
-      return 'Timed out contacting /v1/models.';
+      return `Timed out contacting ${endpoint}.`;
     }
-    return 'Could not reach /v1/models.';
+    return `Could not reach ${endpoint}.`;
   }
 
   async function checkStatusFor(baseUrl, timeoutMs = STATUS_TIMEOUT_MS) {
@@ -383,6 +456,73 @@ function createMeterlessRuntime(options = {}) {
     } catch (error) {
       return fallback('offline', null, describeFailure(error));
     }
+  }
+
+  /**
+   * Live per-class state from the runtime (GET /v1/meterless/classes). This is
+   * separate from /v1/models: a class can be listed in the catalogue while
+   * still being seated ("may take a moment") or unavailable on this machine.
+   * A runtime without the route gets an empty list and `source: 'unavailable'`.
+   */
+  async function listClasses() {
+    const baseUrl = resolveBaseUrl();
+    const startedAt = Date.now();
+    const checkedAt = new Date().toISOString();
+
+    const fallback = (status, reason, extra = {}) => ({
+      status,
+      classes: [],
+      bareState: null,
+      source: 'unavailable',
+      reason,
+      baseUrl,
+      httpStatus: null,
+      latencyMs: Date.now() - startedAt,
+      checkedAt,
+      ...extra
+    });
+
+    let response;
+    let body;
+    try {
+      const result = await fetchJson(
+        `${baseUrl}/meterless/classes`,
+        { method: 'GET', headers: buildHeaders() },
+        CLASSES_TIMEOUT_MS
+      );
+      response = result.response;
+      body = result.body;
+    } catch (error) {
+      return fallback('offline', describeFailure(error, '/v1/meterless/classes'));
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      return fallback('unauthorized', 'The runtime rejected the token.');
+    }
+
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      return fallback('unavailable', 'This runtime does not expose GET /v1/meterless/classes.');
+    }
+
+    if (response.status !== 200) {
+      return fallback(
+        'offline',
+        `Unexpected HTTP ${response.status} from /v1/meterless/classes.`,
+        { httpStatus: response.status }
+      );
+    }
+
+    const { classes, bareState } = parseClasses(body);
+    return {
+      status: 'online',
+      classes,
+      bareState,
+      source: 'runtime',
+      baseUrl,
+      httpStatus: 200,
+      latencyMs: Date.now() - startedAt,
+      checkedAt
+    };
   }
 
   /**
@@ -539,6 +679,7 @@ function createMeterlessRuntime(options = {}) {
     connect,
     getStatus,
     listModels,
+    listClasses,
     chat,
     chatDetailed,
     autoDetect,
@@ -552,6 +693,7 @@ module.exports = {
   APP_HEADER,
   CHAT_SCOPE,
   CHAT_TIMEOUT_MS,
+  CLASSES_TIMEOUT_MS,
   DEFAULT_APP_ID,
   DEFAULT_DISPOSITIONS,
   KEY_BASE_URL,
@@ -568,5 +710,7 @@ module.exports = {
   extractModelIds,
   isUsableToken,
   normalizeAppId,
+  normalizeClassState,
+  parseClasses,
   splitModelIds
 };

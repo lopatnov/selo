@@ -79,6 +79,42 @@ function offlineModels() {
   });
 }
 
+function makeClasses(overrides = {}) {
+  return {
+    status: 'online',
+    httpStatus: 200,
+    source: 'runtime',
+    checkedAt: new Date().toISOString(),
+    classes: [
+      {
+        id: 'meterless/text',
+        state: 'ready',
+        label: 'ready',
+        why: '',
+        chatCarrier: true,
+        routes: ['POST /v1/chat/completions']
+      },
+      {
+        id: 'meterless/image',
+        state: 'unavailable',
+        label: 'unavailable',
+        why: 'no GPU lane seated',
+        chatCarrier: false,
+        routes: ['POST /v1/jobs']
+      },
+      {
+        id: 'meterless/judge',
+        state: 'starting',
+        label: 'may take a moment',
+        why: '',
+        chatCarrier: true,
+        routes: []
+      }
+    ],
+    ...overrides
+  };
+}
+
 function zetarisPayload() {
   return {
     restUrl: 'http://127.0.0.1:8888',
@@ -106,6 +142,7 @@ async function installProviderMocks(page, options = {}) {
   const state = {
     config: options.config || makeConfig(),
     models: options.models || makeModels(),
+    classes: options.classes || makeClasses(),
     detect: options.detect || {
       found: true,
       baseUrl: 'http://192.168.1.20:8088/v1',
@@ -139,6 +176,10 @@ async function installProviderMocks(page, options = {}) {
 
     if (method === 'GET' && path === '/meterless/models') {
       return route.fulfill({ json: state.models });
+    }
+
+    if (method === 'GET' && path === '/meterless/classes') {
+      return route.fulfill({ json: state.classes });
     }
 
     if (method === 'POST' && path === '/meterless/detect') {
@@ -361,4 +402,17 @@ test('Save sends the base URL and token and never renders the token back', async
     baseUrl: 'localhost:8787/v1/models',
     token: 'rt-test-token'
   });
+});
+
+test('shows live class state with unavailable classes dimmed', async ({ page }) => {
+  await installProviderMocks(page, { classes: makeClasses() });
+
+  await page.goto('/providers');
+
+  const list = page.getByTestId('classes-list');
+  await expect(list).toContainText('meterless/text');
+  await expect(list).toContainText('ready');
+  await expect(list).toContainText('meterless/image');
+  await expect(list).toContainText('unavailable');
+  await expect(list).toContainText('may take a moment');
 });

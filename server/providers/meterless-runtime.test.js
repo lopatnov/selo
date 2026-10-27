@@ -16,12 +16,15 @@ const {
 const { SettingsStore } = require('./settings-store');
 const {
   CHAT_TIMEOUT_MS,
+  CLASSES_TIMEOUT_MS,
   DEFAULT_DISPOSITIONS,
   KEY_BASE_URL,
   KEY_TOKEN,
   ProviderError,
   createMeterlessRuntime,
-  isUsableToken
+  isUsableToken,
+  normalizeClassState,
+  parseClasses
 } = require('./meterless-runtime');
 
 function tempDir() {
@@ -483,4 +486,76 @@ test('connect persists the base URL and token so a fresh process still sees them
   assert.deepEqual(reloaded.resolveToken(), { token: 'persisted-key', source: 'settings' });
   assert.equal(reloaded.getConfig().baseUrl, 'http://10.0.0.5:8787/v1');
   assert.equal(reloaded.getConfig().baseUrlSource, 'settings');
+});
+
+test('normalizeClassState maps the runtime vocabulary to stable buckets', () => {
+  assert.equal(CLASSES_TIMEOUT_MS, 15_000);
+  assert.deepEqual(normalizeClassState('ready'), { state: 'ready', label: 'ready' });
+  assert.deepEqual(normalizeClassState('starting'), {
+    state: 'may_take_a_moment',
+    label: 'may take a moment'
+  });
+  assert.deepEqual(normalizeClassState('admittable'), {
+    state: 'may_take_a_moment',
+    label: 'may take a moment'
+  });
+  assert.deepEqual(normalizeClassState('cloud'), { state: 'cloud', label: 'leaves the machine' });
+  assert.deepEqual(normalizeClassState('unavailable'), {
+    state: 'unavailable',
+    label: 'unavailable'
+  });
+  assert.deepEqual(normalizeClassState(''), { state: 'unknown', label: 'unknown' });
+});
+
+test('parseClasses accepts both shapes and a bare string state', () => {
+  const objectShape = parseClasses({
+    classes: {
+      'meterless/text': { state: 'ready', chat_carrier: true },
+      'meterless/mesh': { state: 'admittable', why: 'needs a 3D lane' }
+    }
+  });
+  assert.equal(objectShape.classes.length, 2);
+  assert.equal(objectShape.classes[0].id, 'meterless/text');
+  assert.equal(objectShape.classes[0].state, 'ready');
+  assert.equal(objectShape.classes[0].chatCarrier, true);
+  assert.equal(objectShape.classes[1].id, 'meterless/mesh');
+  assert.equal(objectShape.classes[1].state, 'may_take_a_moment');
+
+  const dataShape = parseClasses({
+    data: [
+      { class: 'meterless/image', state: 'unavailable', why: 'no lane' },
+      { class: 'meterless/video', state: 'cloud' }
+    ]
+  });
+  assert.equal(dataShape.classes.length, 2);
+  assert.equal(dataShape.classes[0].id, 'meterless/image');
+  assert.equal(dataShape.classes[1].state, 'cloud');
+
+  const bare = parseClasses('ready');
+  assert.equal(bare.classes.length, 0);
+  assert.equal(bare.bareState, 'ready');
+});
+
+test('listClasses reads live state; missing route and wrong token degrade', async () => {
+  const online = makeRuntime({
+    fetchImpl: async () =>
+      jsonResponse(200, { classes: { 'meterless/text': { state: 'ready', chat_carrier: true } } })
+  });
+  const result = await online.runtime.listClasses();
+  assert.equal(result.status, 'online');
+  assert.equal(result.source, 'runtime');
+  assert.equal(result.classes[0].id, 'meterless/text');
+  assert.equal(result.classes[0].state, 'ready');
+
+  const missing = makeRuntime({ fetchImpl: async () => jsonResponse(404, {}) });
+  const unsupported = await missing.runtime.listClasses();
+  assert.equal(unsupported.status, 'unavailable');
+  assert.equal(unsupported.source, 'unavailable');
+  assert.equal(unsupported.classes.length, 0);
+
+  const unauthorized = makeRuntime({
+    token: 'wrong-token',
+    fetchImpl: async () => jsonResponse(401, {})
+  });
+  assert.equal((await unauthorized.runtime.listClasses()).status, 'unauthorized');
 });
