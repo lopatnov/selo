@@ -2,6 +2,7 @@ import axios from 'axios';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import API_BASE from '../api';
+import { subscribe } from '../ws';
 
 const TABS = [
   { id: 'ask', label: 'Ask' },
@@ -63,6 +64,21 @@ function MeterlessLogPanel({ newsId }) {
     const timer = setInterval(load, 5000);
     return () => clearInterval(timer);
   }, [load]);
+
+  // New entries arrive over the shared socket the moment the server records
+  // them, so an open panel follows a running discussion without waiting for the
+  // next 5-second poll.
+  useEffect(() => {
+    const unsubscribe = subscribe((type, data) => {
+      if (type !== 'meterless_log_entry' || !data) return;
+      if (newsId && data.newsId !== newsId) return;
+      setEntries(prev => {
+        if (prev.some(entry => entry.id === data.id)) return prev;
+        return [data, ...prev];
+      });
+    });
+    return unsubscribe;
+  }, [newsId]);
 
   const selected = useMemo(
     () => entries.find(entry => entry.id === selectedId) || entries[0] || null,

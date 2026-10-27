@@ -20,6 +20,49 @@ const COMMENT_PANELS = {
   think: { label: '💭 Thinking', title: 'How the model reasoned before answering' }
 };
 
+/**
+ * Live "who is talking right now" line for one news item.
+ * Each agent badge reflects its current turn: 👀 while the request is out,
+ * ✅ on success, ❌ on failure. The roster count stays subtle because a long
+ * static list of "agents that see the news" hid the fact that most of them had
+ * not written a single comment.
+ */
+function AgentActivityLine({ agents, activity }) {
+  const roster = Array.isArray(agents) ? agents : [];
+  const active = Object.values(activity || {});
+  if (roster.length === 0 && active.length === 0) return null;
+
+  return (
+    <span className="news-agents">
+      {active.map(agent => {
+        const emoji =
+          agent.status === 'error' ? '❌' : agent.status === 'success' ? '✅' : '👀';
+        const tooltip =
+          agent.status === 'error' && agent.message
+            ? `${agent.name} · ${agent.model} — ${agent.message}`
+            : `${agent.name} · ${agent.model}`;
+        return (
+          <span
+            key={agent.id}
+            className={`agent-activity ${agent.status || ''}`}
+            title={tooltip}
+          >
+            {emoji} {agent.name} · {agent.model}
+          </span>
+        );
+      })}
+      {roster.length > 0 && (
+        <span
+          className="agent-roster"
+          title={roster.map(agent => `${agent.name} · ${agent.model}`).join('\n')}
+        >
+          {roster.length} watching
+        </span>
+      )}
+    </span>
+  );
+}
+
 function NewsFeed() {
   const [news, setNews] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -39,6 +82,46 @@ function NewsFeed() {
   const [newCommentText, setNewCommentText] = useState('');
   const [participant, setParticipant] = useState(null);
   const commentsEndRef = useRef(null);
+  // Live per-agent turn status: 👀 while a request is in flight, ✅ on success,
+  // ❌ on failure. The badge disappears after the comment is posted.
+  const [agentStatus, setAgentStatus] = useState({});
+  const agentTimersRef = useRef({});
+
+  const clearAgentStatus = (newsId, userId) => {
+    setAgentStatus(prev => {
+      const byAgent = prev[newsId];
+      if (!byAgent || !byAgent[userId]) return prev;
+      const next = { ...byAgent };
+      delete next[userId];
+      return { ...prev, [newsId]: next };
+    });
+  };
+
+  const scheduleAgentClear = (newsId, userId) => {
+    const key = `${newsId}:${userId}`;
+    if (agentTimersRef.current[key]) clearTimeout(agentTimersRef.current[key]);
+    agentTimersRef.current[key] = setTimeout(() => {
+      delete agentTimersRef.current[key];
+      clearAgentStatus(newsId, userId);
+    }, 2600);
+  };
+
+  const handleAgentActivity = data => {
+    if (!data?.newsId || !data?.agent?.id) return;
+    const { newsId, status, agent, ...extra } = data;
+    const key = `${newsId}:${agent.id}`;
+    if (agentTimersRef.current[key]) {
+      clearTimeout(agentTimersRef.current[key]);
+      delete agentTimersRef.current[key];
+    }
+
+    setAgentStatus(prev => ({
+      ...prev,
+      [newsId]: { ...(prev[newsId] || {}), [agent.id]: { ...agent, status, ...extra } }
+    }));
+
+    if (status === 'success') scheduleAgentClear(newsId, agent.id);
+  };
 
   useEffect(() => {
     fetchNews();
@@ -64,6 +147,10 @@ function NewsFeed() {
               }
               return { ...prev, [data.newsId]: [...thread, data] };
             });
+            // A posted (non-error) AI comment means that agent's turn is over.
+            if (data.isAI && !data.isError && data.userId) {
+              clearAgentStatus(data.newsId, data.userId);
+            }
             scrollToBottom();
             break;
           case 'discussion_status':
@@ -73,6 +160,14 @@ function NewsFeed() {
             if (Array.isArray(data.agents)) {
               setDiscussionAgents(prev => ({ ...prev, [data.newsId]: data.agents }));
             }
+            if (!data.active) {
+              setAgentStatus(prev => {
+                if (!prev[data.newsId]) return prev;
+                const next = { ...prev };
+                delete next[data.newsId];
+                return next;
+              });
+            }
             break;
           case 'discussion_error':
             if (!data?.newsId) break;
@@ -80,6 +175,17 @@ function NewsFeed() {
             if (Array.isArray(data.skippedAgents)) {
               setSkippedAgents(prev => ({ ...prev, [data.newsId]: data.skippedAgents }));
             }
+            break;
+          case 'agent_activity':
+            handleAgentActivity(data);
+            break;
+          case 'meterless_log_entry':
+            if (!data?.newsId || !data?.id) break;
+            setLogEntries(prev => {
+              const list = prev[data.newsId] || [];
+              if (list.some(entry => entry.id === data.id)) return prev;
+              return { ...prev, [data.newsId]: [data, ...list] };
+            });
             break;
           default:
             break;
@@ -322,13 +428,10 @@ function NewsFeed() {
                     </button>
                   )}
 
-                  {(discussionAgents[item.id] || []).length > 0 && (
-                    <span className="news-agents" title="The agents that see this news item">
-                      👀 {(discussionAgents[item.id] || [])
-                        .map(agent => `${agent.name} · ${agent.model}`)
-                        .join(' / ')}
-                    </span>
-                  )}
+                  <AgentActivityLine
+                    agents={discussionAgents[item.id]}
+                    activity={agentStatus[item.id]}
+                  />
                 </div>
 
                 {discussionError[item.id] && (

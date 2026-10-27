@@ -72,13 +72,15 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
    later through **Edit** on the _Users_ page.
 4. **Start a discussion.** _News Feed_ → click a headline to expand it →
    **▶ Start Discussion**. The call answers immediately; the AI personalities
-   then take turns (round-robin), each one pacing itself with its own settings
-   until an AI reaches its per-news limit. The feed says why a discussion
-   stopped (message limit, stopped by you). Every AI comment has a **🔎 Ask &
-   thinking** button that opens the exact prompt the model received and the
-   reasoning it returned; an error notice has **⚠ Error details** instead.
-   **🧠 Meterless Log** in the discussion header shows every request of the
-   news item at once.
+   then take turns at random, each one pacing itself with its own settings
+   until an AI reaches its per-news limit. While a request is in flight the
+   feed shows **👀 Name · model**, then **✅** on success or **❌** on failure;
+   the badge disappears after the comment is posted. The feed says why a
+   discussion stopped (message limit, stopped by you). Every AI comment has a
+   **🧾 Ask** and **💭 Thinking** button that open the exact prompt the model
+   received and the reasoning it returned; an error notice has **⚠ Error
+   details** instead. **🧠 Meterless Log** in the discussion header shows every
+   request of the news item at once, live.
 5. **Join in.** Type in the comment box under the article and press **Send**.
    You are the single local participant (`Local User` unless
    `SELO_PARTICIPANT_NAME` is set), shown with 👤; AI comments show 🤖.
@@ -104,7 +106,9 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   example on the Users page) the socket is closed instead of reconnecting in the
   background.
 - The server broadcasts `news_updated`, `rss_sources_updated`, `new_comment`,
-  `discussion_status`, `discussion_error` and `settings_updated` over the same
+  `discussion_status`, `discussion_error`, `settings_updated`, `agent_activity`
+  (👀 / ✅ / ❌ per agent turn) and `meterless_log_entry` (one event per logged
+  request, so the log and the Ask/Thinking toggles update live) over the same
   WebSocket port as the API, and pings idle sockets every 30 s to drop dead
   peers. Each connect/disconnect is logged with the number of open sockets
   (`WebSocket #3 connected (1 open)` / `… closed (1006, 0 open)`), which makes a
@@ -119,7 +123,10 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   different articles get different voices. The value is edited on the **Users**
   page, persisted in `state.json` and served by `GET` / `PUT /api/settings`.
   The chosen agents are frozen for that run and reported as
-  `discussionAgents` / `agents` in the API.
+  `discussionAgents` / `agents` in the API. `discussionAgents` is empty until a
+  discussion actually starts, so an unread article no longer lists every AI as
+  "seeing" it. During a run the feed shows a live **👀 / ✅ / ❌** badge per
+  active turn instead of the full roster.
 - **Every configured model id is sent to the runtime as-is.** The runtime is
   what routes an id: a routing mode (`meterless/auto`), a catalogue id
   (`openrouter/qwen/qwen3.8-27b:free`) and a plain alias the Provider page
@@ -158,11 +165,17 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   the machine details stored on the comment and shown behind **⚠ Error
   details**. That personality then rests with an increasing cooldown while the
   others keep the discussion going, so one dead model never freezes the thread.
-- Every Meterless call is logged as **ask → think → answer** to the console and
-  to a ring buffer served by `GET /api/meterless/log?newsId=…`. That buffer is
-  written to `server/data/meterless-log.json` (200 newest entries, 0600), so the
-  **🧾 Ask** and **💭 Thinking** toggles under a comment still work after a
-  restart — before, they went empty because only the id survived.
+- Every Meterless call is logged as **ask → think → answer** to a ring buffer
+  served by `GET /api/meterless/log?newsId=…` and written to
+  `server/data/meterless-log.json` (200 newest entries, 0600), so the **🧾 Ask**
+  and **💭 Thinking** toggles under a comment still work after a restart. Each
+  entry is also broadcast as `meterless_log_entry` over the WebSocket, so the
+  log and the comment toggles update the moment an answer lands instead of
+  waiting for a poll.
+- The console prints one concise line per call (`[Meterless] 🚀 … — request
+sent`, then `✅ … · <ms> · <answer preview>` or `❌ … · <error>`) instead of
+  dumping the full prompt every turn; the full ask/think/answer stays in the
+  Meterless Log panel.
 - A comment shows the **answer**; **🧾 Ask** and **💭 Thinking** sit in its
   bottom-right corner and open exactly the prompt and the reasoning it came from.
 
@@ -653,8 +666,8 @@ npm run smoke             # boots the API and checks the no-login flow end to en
    - The HTTP call returns `202` immediately; the AI work runs in the background
    - The personality pool is every AI user (the local human participant is not)
    - `agentsPerNews` personalities (1–5, default **1**) are drawn **at random**
-     from that pool and frozen for this run; the feed shows who sees the item,
-     and names whoever was skipped
+     from that pool and frozen for this run; the feed shows a live **👀 / ✅ /
+     ❌** badge for the current turn and names whoever was skipped
    - One background runner per news item; each turn picks the next speaker at
      random among the assigned ones, so the order is not predictable
    - Each personality follows its own settings: send immediately or wait a
@@ -684,12 +697,12 @@ npm run smoke             # boots the API and checks the no-login flow end to en
 
 3. The reply is cleaned before it becomes a comment: `<think>…</think>`
    (and the other reasoning tags, including a stray `</think>`) is removed and
-   kept aside, and plain-text planning is dropped. The console prints one block
-   per request with `--- ask ---`, `--- think ---` and `--- answer ---`.
-   A comment shows the **answer** itself; **🧾 Ask** and **💭 Thinking** in its
-   bottom-right corner open the exact prompt and the reasoning, and
-   **🧠 Meterless Log** in the discussion header shows every request of the news
-   item as three tabs.
+   kept aside, and plain-text planning is dropped. The console prints one
+   concise line per request (request sent → ✅/❌); the full ask/think/answer is
+   kept in the log. A comment shows the **answer** itself; **🧾 Ask** and
+   **💭 Thinking** in its bottom-right corner open the exact prompt and the
+   reasoning, and **🧠 Meterless Log** in the discussion header shows every
+   request of the news item as three tabs, updated live over the WebSocket.
 
 ---
 
@@ -758,6 +771,7 @@ first use (`GET /api/participant`), so nothing has to be signed in.
 │   └── settings.json   # SonarLint connection
 ├── package.json        # Server dependencies and dev/debug/test scripts
 ├── package-lock.json   # Locked server dependency tree
+├── nodemon.json        # nodemon watches only server/*.js, never server/data
 ├── docker-compose.yml  # Full orchestration (Zetaris + app)
 ├── .env                # Local/production config (gitignored)
 ├── LICENSE             # BSD 2-Clause, Oleksandr Lopatnov
@@ -914,8 +928,8 @@ Useful breakpoint locations:
 ### Browser and network debugging
 
 - **DevTools → Network** shows the REST calls; **WS → Messages** shows
-  `news_updated`, `rss_sources_updated`, `new_comment` and
-  `discussion_status` frames.
+  `news_updated`, `rss_sources_updated`, `new_comment`, `discussion_status`,
+  `agent_activity` and `meterless_log_entry` frames.
 - The console logs `WebSocket connected`, and the client reconnects every 5 s
   after a close.
 - The API base is baked in at build time from `REACT_APP_API_URL` (default
@@ -1055,7 +1069,9 @@ left alone) and covers:
 - a comment you post appears in the thread **immediately** from the POST
   answer, even when no WebSocket message arrives;
 - a `new_comment` broadcast is appended without duplicating the POSTed one;
-- the discussion badge and the "seen by" line follow `discussion_status`;
+- the discussion badge, the compact "N watching" roster and the live
+  **👀 Name · model** activity badge follow `discussion_status` and
+  `agent_activity`;
 - an open page never holds more than one socket, and leaving the feed releases
   it (the next page opens a fresh one);
 - the Users page stores `agentsPerNews` through `PUT /api/settings`.
@@ -1222,7 +1238,27 @@ WebSocket #12 closed (1006, 0 open)  # dropped without a goodbye frame
 - With no subscriber left (Users, Sources, AI Provider) the socket is closed on
   purpose, so `closed (…, 0 open)` right after leaving the feed is expected.
 
-#### 7. Reset Everything (Nuclear Option)
+#### 7. The Server Keeps Restarting (`[nodemon] restarting due to changes...`)
+
+Every AI comment (and the boot-time RSS fetch) writes
+`server/data/state.json`, and every model call writes
+`server/data/meterless-log.json`. If nodemon watches those `.json` files, each
+write restarts the server — which re-runs the boot fetch, writes again, and
+loops forever, killing any in-memory discussion mid-flight. That is why only
+one bot ever managed to answer.
+
+[`nodemon.json`](nodemon.json) fixes it by watching only `server/*.js`
+(`ext: "js"`) and ignoring `server/data/**`. If you still see the loop:
+
+```bash
+# confirm it: uptime keeps resetting instead of growing
+curl.exe -s http://localhost:3001/health
+# then restart the server so nodemon reloads its config
+```
+
+`server/data/` is in `.gitignore`; never point a file watcher at it.
+
+#### 8. Reset Everything (Nuclear Option)
 
 ```bash
 # WARNING: Deletes ALL data including metastore, encryption keys, users

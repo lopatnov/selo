@@ -326,7 +326,7 @@ test('the Users page stores how many agents see one news item', async ({ page })
   await expect(select).toHaveValue('3');
 });
 
-test('the discussion badge follows the live status', async ({ page }) => {
+test('the discussion badge follows the live status and agent activity', async ({ page }) => {
   await mockApi(page);
   await openExpandedNews(page);
 
@@ -343,5 +343,19 @@ test('the discussion badge follows the live status', async ({ page }) => {
   );
 
   await expect(page.getByText('🟢 Discussion Active')).toBeVisible();
-  await expect(page.getByText(/Alice · meterless\/auto/)).toBeVisible();
+  // The roster is a compact count; the live per-agent badge appears on activity.
+  await expect(page.getByText('1 watching')).toBeVisible();
+
+  await page.evaluate(
+    ({ newsId }) => {
+      const socket = window.__sockets[0];
+      socket.emit('agent_activity', {
+        newsId,
+        status: 'requesting',
+        agent: { id: 'a1', name: 'Alice', model: 'meterless/auto' }
+      });
+    },
+    { newsId: NEWS_ID }
+  );
+  await expect(page.getByText(/👀 Alice · meterless\/auto/)).toBeVisible();
 });

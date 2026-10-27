@@ -145,20 +145,26 @@ function ensureParticipant() {
 // RSS Parser
 const parser = new Parser();
 
-// Every Meterless call is recorded as ask → think → answer, printed to the
-// console and kept in memory so the UI can show exactly the same three parts.
+// Every Meterless call is recorded as ask → think → answer, kept in memory and
+// served to the UI (GET /api/meterless/log). The console prints one concise
+// line per call; the full prompt and reasoning stay available in the Meterless
+// Log panel, so a busy discussion does not flood the terminal with the same
+// prompt over and over.
+function shortPreview(text, max = 80) {
+  const value = String(text == null ? '' : text).replace(/\s+/g, ' ').trim();
+  if (value.length <= max) return value;
+  return `${value.slice(0, max - 1).trimEnd()}…`;
+}
+
 function logMeterlessCall(entry) {
-  const errorLine = entry.error ? ` · ERROR: ${entry.error}` : '';
+  const who = entry.userName || 'unknown user';
+  const model = entry.model || 'unknown model';
+  if (entry.error) {
+    console.log(`[Meterless] ❌ ${who} · ${model} · ${entry.error}`);
+    return;
+  }
   console.log(
-    [
-      `[Meterless] #${entry.id} · ${entry.model} · ${entry.userName || 'unknown user'} · ${entry.durationMs} ms${errorLine}`,
-      '--- ask ---',
-      entry.ask || '(empty)',
-      '--- think ---',
-      entry.think || '(no reasoning returned)',
-      '--- answer ---',
-      entry.answer || '(no answer)'
-    ].join('\n')
+    `[Meterless] ✅ ${who} · ${model} · ${entry.durationMs ?? '?'} ms · ${shortPreview(entry.answer) || '(empty answer)'}`
   );
 }
 
@@ -295,6 +301,8 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
   let lastError = null;
   let attempts = 0;
 
+  console.log(`[Meterless] 🚀 ${user?.name || 'unknown user'} · ${model} — request sent`);
+
   while (attempts < AI_MAX_ATTEMPTS) {
     attempts += 1;
 
@@ -333,6 +341,7 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
           error: null
         });
         logMeterlessCall(entry);
+        broadcast('meterless_log_entry', entry);
         succeeded = true;
         return { answer, think: reasoning, entry, error: null };
       }
@@ -342,7 +351,7 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
         message: 'The model returned reasoning only; there was no answer to post.'
       };
       console.warn(
-        `Meterless attempt ${attempts}/${AI_MAX_ATTEMPTS} produced no postable answer (${user?.name || 'unknown user'}).`
+        `[Meterless] ⚠ ${user?.name || 'unknown user'} · ${model} · attempt ${attempts}/${AI_MAX_ATTEMPTS} produced no postable answer`
       );
     } catch (error) {
       lastError = {
@@ -350,7 +359,7 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
         message: error?.message || 'Meterless request failed.'
       };
       console.error(
-        `Meterless request failed (attempt ${attempts}/${AI_MAX_ATTEMPTS}, ${lastError.code}): ${lastError.message}`
+        `[Meterless] ❌ ${user?.name || 'unknown user'} · ${model} · attempt ${attempts}/${AI_MAX_ATTEMPTS} · ${lastError.code}: ${lastError.message}`
       );
       if (AI_NON_RETRYABLE.has(lastError.code)) break;
     } finally {
@@ -369,6 +378,7 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
     error: `${reported.message} (after ${attempts} attempt${attempts === 1 ? '' : 's'})`
   });
   logMeterlessCall(entry);
+  broadcast('meterless_log_entry', entry);
 
   return { answer: '', think: '', entry, error: reported };
 }
@@ -688,6 +698,25 @@ function buildDiscussionPrompt(news, user, comments) {
   return { system: buildSystemPrompt(user), user: userPrompt };
 }
 
+/**
+ * One WebSocket event per agent turn so the News Feed can show live activity
+ * instead of a static "who sees this news item" list:
+ *   requesting → 👀  success → ✅  error → ❌
+ * After a successful comment the UI hides the badge again.
+ */
+function broadcastAgentActivity(newsId, user, status, extra = {}) {
+  broadcast('agent_activity', {
+    newsId,
+    status,
+    agent: {
+      id: user.id,
+      name: user.name,
+      model: user.modelName || ''
+    },
+    ...extra
+  });
+}
+
 function finishDiscussion(newsId, reason) {
   const current = storage.discussions.get(newsId);
   if (!current?.active) return;
@@ -748,6 +777,7 @@ async function runDiscussion(newsId, news) {
     if (delayMs > 0 && !(await waitForDiscussion(newsId, delayMs))) return;
 
     const prompt = buildDiscussionPrompt(news, picked.user, commentThread(newsId));
+    broadcastAgentActivity(newsId, picked.user, 'requesting');
     const result = await callMeterlessAI({
       newsId,
       user: picked.user,
@@ -761,8 +791,11 @@ async function runDiscussion(newsId, news) {
       cooldowns.delete(picked.user.id);
       apologized.delete(picked.user.id);
       failuresByUser.delete(picked.user.id);
-      await addComment(newsId, picked.user.id, result.answer, true, {
+      const comment = await addComment(newsId, picked.user.id, result.answer, true, {
         logEntryId: result.entry?.id ?? null
+      });
+      broadcastAgentActivity(newsId, picked.user, 'success', {
+        commentId: comment?.id ?? null
       });
       continue;
     }
@@ -778,6 +811,11 @@ async function runDiscussion(newsId, news) {
       DISCUSSION_FAILURE_COOLDOWN_MS * strikes
     );
     cooldowns.set(picked.user.id, Date.now() + cooldownMs);
+
+    broadcastAgentActivity(newsId, picked.user, 'error', {
+      code: failure.code,
+      message: failure.message
+    });
 
     if (!apologized.has(picked.user.id)) {
       apologized.add(picked.user.id);
@@ -1246,11 +1284,13 @@ app.get('/api/news/:id', (req, res) => {
     discussionActive: discussion?.active || false,
     discussionStoppedReason: discussion?.stoppedReason || null,
     // Which personalities "see" this news item right now.
-    discussionAgents: discussionAgents(discussion).map(user => ({
-      id: user.id,
-      name: user.name,
-      model: user.modelName
-    })),
+    discussionAgents: discussion
+      ? discussionAgents(discussion).map(user => ({
+          id: user.id,
+          name: user.name,
+          model: user.modelName
+        }))
+      : [],
     discussionSkippedAgents: discussion?.skippedAgents || []
   });
 });
