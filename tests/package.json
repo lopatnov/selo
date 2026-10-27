@@ -6,6 +6,8 @@
   "private": true,
   "scripts": {
     "test": "playwright test",
+    "test:feed": "playwright test --config playwright.feed.config.js",
+    "test:feed:headed": "playwright test --config playwright.feed.config.js --headed",
     "test:providers": "playwright test --config playwright.providers.config.js",
     "test:providers:headed": "playwright test --config playwright.providers.config.js --headed",
     "test:ui": "playwright test --ui",

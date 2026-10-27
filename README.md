@@ -96,15 +96,41 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
 
 ### What happens behind the UI
 
-- The server broadcasts `news_updated`, `rss_sources_updated`, `new_comment`
-  and `discussion_status` over the same WebSocket port as the API. The client
-  derives the URL from `REACT_APP_API_URL` in [`client/src/api.js`](client/src/api.js:5).
+- **One WebSocket per page.** The socket lives in
+  [`client/src/ws.js`](client/src/ws.js:1) as a module-level singleton with
+  reference-counted subscribers, a single backoff reconnect timer and a grace
+  period on shutdown, so route changes and React's double mount cannot open a
+  second connection. Components only subscribe; with no subscriber left (for
+  example on the Users page) the socket is closed instead of reconnecting in the
+  background.
+- The server broadcasts `news_updated`, `rss_sources_updated`, `new_comment`,
+  `discussion_status`, `discussion_error` and `settings_updated` over the same
+  WebSocket port as the API, and pings idle sockets every 30 s to drop dead
+  peers. Each connect/disconnect is logged with the number of open sockets
+  (`WebSocket #3 connected (1 open)` / `… closed (1006, 0 open)`), which makes a
+  reconnect loop obvious. The client derives the URL from `REACT_APP_API_URL` in
+  [`client/src/api.js`](client/src/api.js:5).
 - Comments and AI replies are persisted in `server/data/state.json`; **active
-  discussion timers are memory-only** and stop when the server restarts.
-- A discussion uses every user with `isAI !== false` except the local human
-  participant (`modelName: "human"`). Each request is capped at
-  `max_tokens: 700`, `temperature: 0.8` and a 180 s runtime timeout; the cap is
-  generous on purpose, because reasoning models spend tokens before the answer.
+  discussion timers are memory-only** and stop when the server restarts. A
+  comment is written to disk immediately (an AI answer costs a model call), not
+  when the debounce window happens to close.
+- **Agent selection is random and configurable.** A news item is given to at
+  most `agentsPerNews` personalities (1–5, default **1**), drawn at random, so
+  different articles get different voices. The value is edited on the **Users**
+  page, persisted in `state.json` and served by `GET` / `PUT /api/settings`.
+  The chosen agents are frozen for that run and reported as
+  `discussionAgents` / `agents` in the API.
+- **Every configured model id is sent to the runtime as-is.** The runtime is
+  what routes an id: a routing mode (`meterless/auto`), a catalogue id
+  (`openrouter/qwen/qwen3.8-27b:free`) and a plain alias the Provider page
+  already accepts (`qwen3-8-27b-free`) all work, so the `/v1/models` catalogue
+  is _not_ a whitelist and no personality is skipped for an "unknown model".
+  Only a `cloud/<model>` id requires `METERLESS_API_KEY`; ids are never
+  silently posted to the dead legacy endpoint any more, and a refusal from the
+  runtime is posted as that personality's error.
+- Each request is capped at `max_tokens: 700`, `temperature: 0.8` and a 180 s
+  runtime timeout; the cap is generous on purpose, because reasoning models
+  spend tokens before the answer.
 - Pacing and limits are per personality and normalised by
   [`server/discussion-settings.js`](server/discussion-settings.js:1):
   `sendImmediately`, `delayMinSec`/`delayMaxSec`, `maxMessagesPerNews`,
@@ -114,8 +140,12 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   arrive over the WebSocket, so a cold model (a cold routing mode can take
   minutes) never turns into a misleading "Meterless is not configured" alert.
   A start is only refused with a real reason: the news item is gone (`404`), no
-  AI personality exists (`400`), or every AI already reached its per-news
-  message limit (`409`); the server's own message is shown in the feed.
+  AI personality exists (`400`), no personality has a usable model
+  (`409 no_usable_models`), or every AI already reached its per-news message
+  limit (`409`); the server's own message is shown in the feed.
+- **Request counters for debugging**: [`server/activity.js`](server/activity.js:1)
+  counts every Meterless call per agent + model (in flight, completed, failed);
+  `GET /api/activity` returns the snapshot, nothing polls it.
 - Model reasoning is never posted: `<think>…</think>`, `<thinking>`,
   `<reasoning>` and a stray `</think>` are stripped by
   [`server/meterless-text.js`](server/meterless-text.js:1), and
@@ -124,58 +154,63 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   sentence, so a quoted chain of thought can never become a comment.
 - A failed Meterless call is retried up to three times (configuration errors
   such as a rejected token are not retried). If the answer still does not
-  arrive, the personality posts an in-character apology ("I honestly don't know
-  what to make of this — my request never reached the model.") with the machine
-  details stored on the comment and shown behind **⚠ Error details**. That
-  personality then rests with an increasing cooldown while the others keep the
-  discussion going, so one dead model never freezes the thread.
+  arrive, the personality posts an in-character apology naming its model, with
+  the machine details stored on the comment and shown behind **⚠ Error
+  details**. That personality then rests with an increasing cooldown while the
+  others keep the discussion going, so one dead model never freezes the thread.
 - Every Meterless call is logged as **ask → think → answer** to the console and
-  to an in-memory ring buffer served by `GET /api/meterless/log?newsId=…`.
-- Failed AI calls never crash a discussion: the error is stored as a comment
-  (`[AI Error: …]`, or a token hint when the runtime answers `401`) and the log
-  entry carries the error text.
+  to a ring buffer served by `GET /api/meterless/log?newsId=…`. That buffer is
+  written to `server/data/meterless-log.json` (200 newest entries, 0600), so the
+  **🧾 Ask** and **💭 Thinking** toggles under a comment still work after a
+  restart — before, they went empty because only the id survived.
+- A comment shows the **answer**; **🧾 Ask** and **💭 Thinking** sit in its
+  bottom-right corner and open exactly the prompt and the reasoning it came from.
 
 ### API quick reference
 
 There is no auth header anywhere; every route below is open by design.
 
-| Method         | Route                                            | Purpose                                                                  |
-| -------------- | ------------------------------------------------ | ------------------------------------------------------------------------ |
-| `GET`          | `/health`                                        | Liveness probe (`{ status, uptime }`)                                    |
-| `GET` / `PUT`  | `/api/participant`                               | Read or rename the local participant                                     |
-| `GET` / `POST` | `/api/rss-sources`                               | List feeds with stats / add a feed                                       |
-| `POST`         | `/api/rss-sources/:id/fetch`                     | Poll one feed                                                            |
-| `DELETE`       | `/api/rss-sources/:id`                           | Remove a feed                                                            |
-| `POST`         | `/api/news/fetch`                                | Poll every feed and return per-source results                            |
-| `GET`          | `/api/news`                                      | News items, newest first                                                 |
-| `GET`          | `/api/news/:id`                                  | One item with comments, `discussionActive` and `discussionStoppedReason` |
-| `GET` / `POST` | `/api/users`                                     | List / create personalities (including discussion settings)              |
-| `PUT`          | `/api/users/:id`                                 | Edit a personality and its discussion settings                           |
-| `DELETE`       | `/api/users/:id`                                 | Delete a personality                                                     |
-| `POST`         | `/api/comments`                                  | Add a comment as the participant (`newsId`, `userId`, `text`)            |
-| `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start (`202`, non-blocking) or stop the AI loop for a `newsId`           |
-| `GET`          | `/api/meterless/log?newsId=…&limit=…`            | ask / think / answer records, newest first                               |
-| `DELETE`       | `/api/meterless/log?newsId=…`                    | Clear the log (one news item, or all of it)                              |
-| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                                          |
-| `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`                |
-| `GET`          | `/api/providers/status`                          | Summary of both providers                                                |
-| `GET`          | `/api/providers`                                 | Registered provider descriptors                                          |
-| `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                                  |
-| `PUT`          | `/api/providers/meterless/config`                | Save base URL and/or token                                               |
-| `POST`         | `/api/providers/meterless/detect`                | Auto-detect a runtime on the usual ports                                 |
-| `POST`         | `/api/providers/meterless/connect`               | Apply a `http://host:port/connect#k=…` link                              |
-| `GET`          | `/api/providers/meterless/models`                | Models / routing modes                                                   |
-| `GET`          | `/api/providers/meterless/health`                | Runtime `/healthz` probe                                                 |
-| `POST`         | `/api/providers/meterless/chat`                  | One chat request (`model`, `messages`)                                   |
+| Method         | Route                                            | Purpose                                                                 |
+| -------------- | ------------------------------------------------ | ----------------------------------------------------------------------- |
+| `GET`          | `/health`                                        | Liveness probe (`{ status, uptime }`)                                   |
+| `GET` / `PUT`  | `/api/participant`                               | Read or rename the local participant                                    |
+| `GET` / `POST` | `/api/rss-sources`                               | List feeds with stats / add a feed                                      |
+| `POST`         | `/api/rss-sources/:id/fetch`                     | Poll one feed                                                           |
+| `DELETE`       | `/api/rss-sources/:id`                           | Remove a feed                                                           |
+| `POST`         | `/api/news/fetch`                                | Poll every feed and return per-source results                           |
+| `GET`          | `/api/news`                                      | News items, newest first                                                |
+| `GET`          | `/api/news/:id`                                  | One item with comments, `discussionActive`, its agents and skipped ones |
+| `GET`          | `/api/activity`                                  | Per agent + model: in-flight, completed, failed requests                |
+| `GET` / `PUT`  | `/api/settings`                                  | Global discussion settings (`agentsPerNews`, 1–5, default 1)            |
+| `GET` / `POST` | `/api/users`                                     | List / create personalities (including discussion settings)             |
+| `PUT`          | `/api/users/:id`                                 | Edit a personality and its discussion settings                          |
+| `DELETE`       | `/api/users/:id`                                 | Delete a personality                                                    |
+| `POST`         | `/api/comments`                                  | Add a comment as the participant (`newsId`, `userId`, `text`)           |
+| `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start (`202`, non-blocking) or stop the AI loop for a `newsId`          |
+| `GET`          | `/api/meterless/log?newsId=…&limit=…`            | ask / think / answer records, newest first                              |
+| `DELETE`       | `/api/meterless/log?newsId=…`                    | Clear the log (one news item, or all of it)                             |
+| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                                         |
+| `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`               |
+| `GET`          | `/api/providers/status`                          | Summary of both providers                                               |
+| `GET`          | `/api/providers`                                 | Registered provider descriptors                                         |
+| `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                                 |
+| `PUT`          | `/api/providers/meterless/config`                | Save base URL and/or token                                              |
+| `POST`         | `/api/providers/meterless/detect`                | Auto-detect a runtime on the usual ports                                |
+| `POST`         | `/api/providers/meterless/connect`               | Apply a `http://host:port/connect#k=…` link                             |
+| `GET`          | `/api/providers/meterless/models`                | Models / routing modes                                                  |
+| `GET`          | `/api/providers/meterless/health`                | Runtime `/healthz` probe                                                |
+| `POST`         | `/api/providers/meterless/chat`                  | One chat request (`model`, `messages`)                                  |
 
 WebSocket messages accepted by the server: `start_discussion`, `stop_discussion`
-and `add_comment`, each with a `data` object.
+and `add_comment`, each with a `data` object. A refused `start_discussion` is
+answered on the same socket with `discussion_error` (message + skipped agents).
 
 ```bash
 # PowerShell — quick checks against a local API
 curl.exe http://localhost:3001/health
 curl.exe http://localhost:3001/api/participant
 curl.exe http://localhost:3001/api/providers/status
+curl.exe http://localhost:3001/api/activity
 curl.exe -X POST http://localhost:3001/api/news/fetch
 ```
 
@@ -349,14 +384,15 @@ CSV/filesystem-backed lightning tables, not a row-by-row application store.
 So the app owns its data in one JSON document and uses Zetaris as the
 SQL/analytics surface:
 
-| Data Type                  | Stored In                                                                                                      |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| **RSS Sources**            | `server/data/state.json` → `rssSources[]` — every feed in the list is polled                                   |
-| **Users/AI Personalities** | `server/data/state.json` → `users[]`                                                                           |
-| **News Articles**          | `server/data/state.json` → `news[]` (newest 1000)                                                              |
-| **Comments**               | `server/data/state.json` → `comments[]` (newest 5000)                                                          |
-| **Discussion State**       | Server memory only — active timers die with the process                                                        |
-| **Zetaris access**         | REST SQL: `GET /api/zetaris` (status), `POST /api/zetaris/query` (read-only `SELECT`/`SHOW`/`DESCRIBE`/`WITH`) |
+| Data Type                  | Stored In                                                                                                                   |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **Meterless log**          | `server/data/meterless-log.json` — the 200 newest ask / think / answer records, so **Ask** / **Thinking** survive a restart |
+| **RSS Sources**            | `server/data/state.json` → `rssSources[]` — every feed in the list is polled                                                |
+| **Users/AI Personalities** | `server/data/state.json` → `users[]`                                                                                        |
+| **News Articles**          | `server/data/state.json` → `news[]` (newest 1000)                                                                           |
+| **Comments**               | `server/data/state.json` → `comments[]` (newest 5000)                                                                       |
+| **Discussion State**       | Server memory only — active timers die with the process                                                                     |
+| **Zetaris access**         | REST SQL: `GET /api/zetaris` (status), `POST /api/zetaris/query` (read-only `SELECT`/`SHOW`/`DESCRIBE`/`WITH`)              |
 
 `server/data/` is in `.gitignore` and is the `server-data` Docker volume, so the
 feed list, the personalities and the discussion history survive a restart.
@@ -615,9 +651,12 @@ npm run smoke             # boots the API and checks the no-login flow end to en
 
 1. When "Start Discussion" is clicked for a news item:
    - The HTTP call returns `202` immediately; the AI work runs in the background
-   - Every AI personality in the app is used (the local human participant is not)
-   - One background runner per news item walks the personalities round-robin,
-     so every AI speaks instead of one voice taking the thread
+   - The personality pool is every AI user (the local human participant is not)
+   - `agentsPerNews` personalities (1–5, default **1**) are drawn **at random**
+     from that pool and frozen for this run; the feed shows who sees the item,
+     and names whoever was skipped
+   - One background runner per news item; each turn picks the next speaker at
+     random among the assigned ones, so the order is not predictable
    - Each personality follows its own settings: send immediately or wait a
      random delay inside its min/max range, stop at `maxMessagesPerNews`, and
      step aside after `maxConsecutiveMessages` own messages in a row (the runner
@@ -625,8 +664,8 @@ npm run smoke             # boots the API and checks the no-login flow end to en
    - Provider failures never stop the discussion: the call is retried, the
      personality posts one in-character apology with error details, then rests
      with a growing cooldown while the others continue
-   - The discussion stops by itself only when every AI reached its per-news
-     limit (`max_messages`)
+   - The discussion stops by itself only when every assigned AI reached its
+     per-news limit (`max_messages`)
    - Responses limited to 2-3 sentences, temperature 0.8, `max_tokens: 700`
 
 2. AI prompts contain as much of the conversation as fits (`PROMPT_*` in
@@ -647,8 +686,10 @@ npm run smoke             # boots the API and checks the no-login flow end to en
    (and the other reasoning tags, including a stray `</think>`) is removed and
    kept aside, and plain-text planning is dropped. The console prints one block
    per request with `--- ask ---`, `--- think ---` and `--- answer ---`.
-   Each AI comment has **🔎 Ask & thinking**, and **🧠 Meterless Log** in the
-   discussion header shows every request of the news item as three tabs.
+   A comment shows the **answer** itself; **🧾 Ask** and **💭 Thinking** in its
+   bottom-right corner open the exact prompt and the reasoning, and
+   **🧠 Meterless Log** in the discussion header shows every request of the news
+   item as three tabs.
 
 ---
 
@@ -996,6 +1037,29 @@ npm --prefix tests install
 npm --prefix tests run install-browsers
 ```
 
+Focused, hermetic suite for the news feed and the comments:
+
+```bash
+npm run test:e2e                        # = npm --prefix tests run test:feed
+npm --prefix tests run test:feed:headed
+```
+
+[`tests/feed.spec.js`](tests/feed.spec.js) boots the real React client with
+[`tests/playwright.feed.config.js`](tests/playwright.feed.config.js), mocks
+`/api/*` and the app's WebSocket in the browser (the CRA hot-reload socket is
+left alone) and covers:
+
+- the posted **answer** is the comment body, while **🧾 Ask** and
+  **💭 Thinking** in its bottom-right corner open the prompt and the reasoning
+  on demand;
+- a comment you post appears in the thread **immediately** from the POST
+  answer, even when no WebSocket message arrives;
+- a `new_comment` broadcast is appended without duplicating the POSTed one;
+- the discussion badge and the "seen by" line follow `discussion_status`;
+- an open page never holds more than one socket, and leaving the feed releases
+  it (the next page opens a fresh one);
+- the Users page stores `agentsPerNews` through `PUT /api/settings`.
+
 Focused, hermetic suite for the AI Provider page:
 
 ```bash
@@ -1042,6 +1106,7 @@ Notes:
 ```bash
 npm run install-all
 npm test
+npm run test:e2e            # hermetic Playwright: feed + comments
 npm run smoke
 npm run verify:provider
 # optional: require credentials and a deployed stack
@@ -1140,7 +1205,24 @@ docker volume ls
 # Should show: selo_pgdata, selo_customer-data, selo_driver-data, etc.
 ```
 
-#### 5. Reset Everything (Nuclear Option)
+#### 6. A Flood of "New WebSocket connection" Lines
+
+Each connect/disconnect is logged with the number of open sockets, so the log
+says whether a flood is real:
+
+```text
+WebSocket #12 connected (1 open)     # a single page: one socket
+WebSocket #12 closed (1006, 0 open)  # dropped without a goodbye frame
+```
+
+- `… (1 open)` repeating means the page is reloading or several tabs are open.
+- The client must be the **current bundle**: a Docker image built before the
+  single-socket fix still reconnects per component. Rebuild it with
+  `docker compose up --build -d client` (or use `npm --prefix client start`).
+- With no subscriber left (Users, Sources, AI Provider) the socket is closed on
+  purpose, so `closed (…, 0 open)` right after leaving the feed is expected.
+
+#### 7. Reset Everything (Nuclear Option)
 
 ```bash
 # WARNING: Deletes ALL data including metastore, encryption keys, users

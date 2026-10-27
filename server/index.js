@@ -13,7 +13,12 @@ const { createProvidersRouter } = require('./providers/routes');
 const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { sanitizeModelText } = require('./meterless-text');
-const { createMeterlessLog } = require('./meterless-log');
+const { createMeterlessLog, defaultLogFile } = require('./meterless-log');
+const { createActivityTracker } = require('./activity');
+const {
+  APP_SETTINGS_LIMITS,
+  normalizeAppSettings
+} = require('./app-settings');
 const {
   canPostMessage,
   nextDelayMs,
@@ -50,16 +55,21 @@ const zetaris = createZetaris();
 // volume in Docker), so RSS sources, AI personalities, news and comments
 // survive a restart. SELO_STATE_FILE overrides the path.
 const stateStore = createStateStore();
-// ask / think / answer records for every Meterless call, newest first.
-const meterlessLog = createMeterlessLog({ limit: 200 });
+// ask / think / answer records for every Meterless call, newest first. They are
+// persisted next to the app state, so the **Ask** / **Thinking** toggles under a
+// comment still work after a restart.
+const meterlessLog = createMeterlessLog({ limit: 200, file: defaultLogFile() });
+// Per-agent request counters, served by `GET /api/activity` for diagnostics.
+const activity = createActivityTracker();
 
 const storage = {
   rssSources: [],
   users: [],
   news: [],
   comments: [],
-  discussions: new Map(), // newsId -> { active: boolean, interval: timer }
-  participantId: null
+  discussions: new Map(), // newsId -> { active: boolean, runner, agentIds, ... }
+  participantId: null,
+  settings: normalizeAppSettings()
 };
 
 function hydrateStorage() {
@@ -69,18 +79,47 @@ function hydrateStorage() {
   storage.news = saved.news;
   storage.comments = saved.comments;
   storage.participantId = saved.participantId;
+  storage.settings = normalizeAppSettings(saved.settings);
   return saved;
 }
 
-// Every mutation funnels through here: one debounced write per burst.
-function persist() {
+/**
+ * Every mutation funnels through here: one debounced write per burst.
+ *
+ * `immediate` is used for comments: an AI answer costs a model call and cannot
+ * be regenerated, so it must reach the disk before the next (possibly forced)
+ * shutdown instead of waiting for the debounce window.
+ */
+function persist({ immediate = false } = {}) {
   stateStore.write({
     participantId: storage.participantId,
     rssSources: storage.rssSources,
     users: storage.users,
     news: storage.news,
-    comments: storage.comments
+    comments: storage.comments,
+    settings: normalizeAppSettings(storage.settings)
   });
+  if (immediate) stateStore.flush();
+}
+
+/**
+ * The payload behind `GET /api/activity`: the request counters plus how many
+ * discussions are running right now. Diagnostics only — the UI does not poll it.
+ */
+function activityPayload(snapshot = activity.snapshot()) {
+  let activeDiscussions = 0;
+  for (const discussion of storage.discussions.values()) {
+    if (discussion?.active) activeDiscussions += 1;
+  }
+  return {
+    ...snapshot,
+    settings: normalizeAppSettings(storage.settings),
+    activeDiscussions
+  };
+}
+
+function currentSettings() {
+  return normalizeAppSettings(storage.settings);
 }
 
 const PARTICIPANT_NAME = process.env.SELO_PARTICIPANT_NAME || 'Local User';
@@ -128,35 +167,100 @@ const AI_RETRY_DELAY_MS = 900;
 // A rejected token or a missing key cannot be fixed by repeating the request.
 const AI_NON_RETRYABLE = new Set(['unauthorized', 'invalid_token', 'invalid_request']);
 
+// ---------------------------------------------------------------------------
+// Model routing
+// ---------------------------------------------------------------------------
+// The Meterless Runtime is this app's AI. It routes every model id the user can
+// configure: routing modes (`meterless/auto`, …), provider ids from its own
+// catalogue (`openrouter/qwen/qwen3.8-27b:free`, `local-runtime/…`) and plain
+// aliases such as `qwen3-8-27b-free`, which the Provider page's "test request"
+// already accepts. The catalogue is therefore *not* a whitelist — an id that is
+// missing from it can still be served, so no personality is ever skipped for
+// "unknown model".
+//
+// The legacy hosted endpoint stays reachable, but only for ids that say so
+// explicitly (`cloud/<model>`): silently posting plain ids to a dead endpoint
+// was the reason a discussion could end without a single usable answer.
+const CLOUD_MODEL_PREFIX = /^(cloud|meterless-cloud)\//i;
+
+/** Routing decisions must not depend on a network round trip per message. */
+function providerForModel(model) {
+  return CLOUD_MODEL_PREFIX.test(model) ? meterlessCloud : meterlessRuntime;
+}
+
+function providerModelName(model) {
+  return CLOUD_MODEL_PREFIX.test(model) ? model.replace(CLOUD_MODEL_PREFIX, '') : model;
+}
+
+/**
+ * Is this personality's model callable at all?
+ *
+ * Only a configuration gap is refused here — a missing id (which falls back to
+ * `meterless/auto` anyway) or a `cloud/` id without `METERLESS_API_KEY`. The
+ * runtime itself decides what it can route, and its own error is reported.
+ *
+ * @returns {{ ok: boolean, provider?: string, model?: string, reason?: string, detail?: string }}
+ */
+function checkModelSupport(model) {
+  const raw = typeof model === 'string' ? model.trim() : '';
+  const id = raw || 'meterless/auto';
+
+  if (CLOUD_MODEL_PREFIX.test(id)) {
+    return meterlessCloud.getConfig().hasToken
+      ? { ok: true, provider: meterlessCloud.id, model: providerModelName(id) }
+      : {
+          ok: false,
+          reason: 'cloud_not_configured',
+          detail: 'METERLESS_API_KEY is not configured for the legacy cloud endpoint.'
+        };
+  }
+
+  return { ok: true, provider: meterlessRuntime.id, model: id };
+}
+
 // Turn the final failure into a message a personality can actually say, plus
 // the machine-readable details the UI shows behind an error button.
-function describeMeterlessFailure(error) {
+function describeMeterlessFailure(error, model = '') {
   const code = error?.code || 'error';
   const message = error?.message || 'Meterless request failed.';
   const attempts = Number.isInteger(error?.attempts) ? error.attempts : null;
+  const label = model ? ` (model "${model}")` : '';
 
   if (code === 'unauthorized' || code === 'invalid_token') {
     return {
       code,
       message,
       attempts,
-      text: "I can't answer yet — my Meterless token was rejected, so the request never reached a model."
+      text: `I can't answer yet — my Meterless token was rejected${label}, so the request never reached a model.`
     };
   }
 
+  if (code === 'offline' || code === 'empty_answer') {
+    return {
+      code,
+      message,
+      attempts,
+      text: `I honestly don't know what to make of this — my request${label} never produced an answer.`
+    };
+  }
+
+  // The runtime did answer, but with a refusal: repeat what it said instead of
+  // pretending the model was unreachable.
   return {
     code,
     message,
     attempts,
-    text: "I honestly don't know what to make of this — my request never reached the model."
+    text: `I can't answer right now${label} — ${message}`
   };
 }
 
 // Helper: Call Meterless AI.
-// `meterless/<routing-mode>` ids go to the local Meterless Runtime provider;
-// every other model id keeps using the existing hosted endpoint.
+// `cloud/<model>` ids go to the legacy hosted endpoint; every other model id is
+// sent to the Meterless Runtime as-is (routing mode, catalogue id or plain
+// alias), because the runtime is what decides how it is routed.
 // Each request is retried a few times before the failure is reported, because
-// a single network hiccup must not end a discussion.
+// a single network hiccup must not end a discussion. Every attempt is visible
+// in the activity tracker, so the header shows what is being processed now.
 // Returns { answer, think, entry, error }: `answer` is sanitised text safe to
 // post, `think` is the reasoning that must never become a comment, `error`
 // carries { code, message, attempts } when no answer could be produced.
@@ -186,17 +290,28 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
     ask: `[system]\n${system}\n\n[user]\n${prompt}`
   };
 
-  const provider = model.startsWith('meterless/') ? meterlessRuntime : meterlessCloud;
+  const provider = providerForModel(model);
+  const providerModel = providerModelName(model);
   let lastError = null;
   let attempts = 0;
 
   while (attempts < AI_MAX_ATTEMPTS) {
     attempts += 1;
+
+    // Visible in the header statistics while the model is working.
+    const handle = activity.begin({
+      userName: user?.name || '',
+      userId: user?.id || null,
+      model,
+      newsId
+    });
+    let succeeded = false;
+
     try {
       // Reasoning models spend tokens on the chain of thought before the answer,
       // so a tight cap truncates them into "reasoning only" replies.
       const result = await provider.chatDetailed({
-        model,
+        model: providerModel,
         messages,
         max_tokens: 700,
         temperature: 0.8
@@ -218,6 +333,7 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
           error: null
         });
         logMeterlessCall(entry);
+        succeeded = true;
         return { answer, think: reasoning, entry, error: null };
       }
 
@@ -237,6 +353,8 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
         `Meterless request failed (attempt ${attempts}/${AI_MAX_ATTEMPTS}, ${lastError.code}): ${lastError.message}`
       );
       if (AI_NON_RETRYABLE.has(lastError.code)) break;
+    } finally {
+      activity.end(handle, { ok: succeeded });
     }
 
     if (attempts < AI_MAX_ATTEMPTS) await sleep(AI_RETRY_DELAY_MS * attempts);
@@ -265,9 +383,36 @@ function broadcast(type, data) {
   });
 }
 
-// WebSocket connection handling
+function sendTo(ws, type, data) {
+  if (ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type, data }));
+}
+
+// One socket per browser tab is enough, so dead peers must be noticed and
+// dropped quickly: proxies silently kill idle connections, and without a
+// heartbeat the server keeps dead sockets (and the client keeps reconnecting
+// on top of a socket that is actually fine).
+const WS_HEARTBEAT_MS = 30000;
+
+let socketSequence = 0;
+
 wss.on('connection', (ws) => {
-  console.log('New WebSocket connection');
+  socketSequence += 1;
+  const socketId = socketSequence;
+  ws.isAlive = true;
+  ws.on('pong', () => {
+    ws.isAlive = true;
+  });
+
+  // The count tells whether a flood is real: one open page must mean one
+  // socket. A close line with its code shows who dropped the connection.
+  const openCount = () => wss.clients.size;
+  console.log(`WebSocket #${socketId} connected (${openCount()} open)`);
+
+  ws.on('close', (code, reason) => {
+    const detail = reason ? ` ${reason}` : '';
+    console.log(`WebSocket #${socketId} closed (${code}${detail}, ${openCount()} open)`);
+  });
 
   ws.on('message', (message) => {
     try {
@@ -277,7 +422,27 @@ wss.on('connection', (ws) => {
       console.error('WebSocket message error:', error);
     }
   });
+
+  // A freshly opened page must not wait for the next change to show the
+  // current discussion settings.
+  sendTo(ws, 'settings_updated', currentSettings());
 });
+
+const wsHeartbeat = setInterval(() => {
+  wss.clients.forEach(client => {
+    if (client.isAlive === false) {
+      client.terminate();
+      return;
+    }
+    client.isAlive = false;
+    try {
+      client.ping();
+    } catch {
+      // The socket vanished between the loop and the ping.
+    }
+  });
+}, WS_HEARTBEAT_MS);
+if (typeof wsHeartbeat.unref === 'function') wsHeartbeat.unref();
 
 // The runner below paces every AI personality with that personality's own
 // settings: send immediately, a min/max delay range, a cap on messages per
@@ -340,13 +505,19 @@ async function waitForDiscussion(newsId, ms) {
   }
 }
 
-// Round-robin over the AI personalities, skipping the ones that may not post
-// and the ones that are cooling down after a provider failure.
-function pickNextAiUser(newsId, users, cursor, cooldowns = new Map()) {
+/**
+ * Pick the next speaker at random among the personalities that may post right
+ * now. Random instead of round-robin on purpose: the order of the discussion
+ * should not be predictable from the order in which the personalities happen
+ * to be stored.
+ *
+ * `random` is injectable so the choice is testable.
+ */
+function pickNextAiUser(newsId, users, cooldowns = new Map(), random = Math.random) {
   const now = Date.now();
-  for (let offset = 0; offset < users.length; offset += 1) {
-    const index = (cursor + offset) % users.length;
-    const user = users[index];
+  const candidates = [];
+
+  for (const user of users) {
     if ((cooldowns.get(user.id) || 0) > now) continue;
     const settings = normalizeDiscussionSettings(user);
     const { allowed } = canPostMessage({
@@ -354,9 +525,27 @@ function pickNextAiUser(newsId, users, cursor, cooldowns = new Map()) {
       consecutiveCount: consecutiveCountFor(newsId, user.id),
       settings
     });
-    if (allowed) return { user, settings, nextCursor: (index + 1) % users.length };
+    if (allowed) candidates.push({ user, settings });
   }
-  return null;
+
+  if (candidates.length === 0) return null;
+  const index = Math.min(candidates.length - 1, Math.floor(random() * candidates.length));
+  return candidates[index];
+}
+
+/**
+ * Draw the personalities that will discuss this news item. A news item is
+ * "seen" by at most `agentsPerNews` (1..5, default 1) personalities; they are
+ * sampled at random, and only from the ones that can still post.
+ */
+function sampleAiUsers(users, count, random = Math.random) {
+  const pool = users.slice();
+  // Fisher–Yates, so every personality has the same chance of being drawn.
+  for (let index = pool.length - 1; index > 0; index -= 1) {
+    const swap = Math.floor(random() * (index + 1));
+    [pool[index], pool[swap]] = [pool[swap], pool[index]];
+  }
+  return pool.slice(0, Math.max(0, count));
 }
 
 function allAiAtMessageLimit(newsId, users) {
@@ -366,11 +555,29 @@ function allAiAtMessageLimit(newsId, users) {
   });
 }
 
+/** The personalities assigned to one discussion (and still existing). */
+function discussionAgents(discussion) {
+  const assigned = Array.isArray(discussion?.agentIds) ? new Set(discussion.agentIds) : null;
+  const users = aiParticipants();
+  if (!assigned || assigned.size === 0) return users;
+  return users.filter(user => assigned.has(user.id));
+}
+
 async function handleWebSocketMessage(ws, type, data) {
   switch (type) {
     case 'start_discussion': {
       const result = await startDiscussion(data?.newsId);
-      if (!result.ok) console.warn(`WebSocket start_discussion refused: ${result.error}`);
+      if (!result.ok) {
+        console.warn(`WebSocket start_discussion refused: ${result.error}`);
+        // Tell this socket why nothing will happen; a silent refusal is what
+        // makes the UI look frozen.
+        sendTo(ws, 'discussion_error', {
+          newsId: data?.newsId ?? null,
+          error: result.error,
+          code: result.code,
+          skippedAgents: result.skippedAgents || []
+        });
+      }
       break;
     }
     case 'stop_discussion':
@@ -495,9 +702,10 @@ function finishDiscussion(newsId, reason) {
 }
 
 /**
- * One background runner per news item. It walks the personalities round-robin,
- * so every AI gets its turn instead of a single voice taking the whole thread,
- * and it honours each personality's own pacing and limits.
+ * One background runner per news item. Only the personalities assigned to that
+ * news item take part (1..5 of them, drawn at random when the discussion
+ * starts); the next speaker is chosen at random among those that may post, and
+ * every personality keeps its own pacing and limits.
  *
  * Runs in the background on purpose: a cold routing mode can take minutes, so
  * the HTTP request must never wait for the first answer.
@@ -516,16 +724,14 @@ async function runDiscussion(newsId, news) {
   discussion.apologies = apologized;
   discussion.failuresByUser = failuresByUser;
 
-  let cursor = 0;
-
   while (isDiscussionActive(newsId)) {
-    const users = aiParticipants();
+    const users = discussionAgents(discussion);
     if (users.length === 0) {
       finishDiscussion(newsId, 'no_ai_users');
       return;
     }
 
-    const picked = pickNextAiUser(newsId, users, cursor, cooldowns);
+    const picked = pickNextAiUser(newsId, users, cooldowns);
     if (!picked) {
       if (allAiAtMessageLimit(newsId, users)) {
         finishDiscussion(newsId, 'max_messages');
@@ -537,8 +743,6 @@ async function runDiscussion(newsId, news) {
       if (!(await waitForDiscussion(newsId, DISCUSSION_IDLE_RECHECK_MS))) return;
       continue;
     }
-
-    cursor = picked.nextCursor;
 
     const delayMs = nextDelayMs(picked.settings);
     if (delayMs > 0 && !(await waitForDiscussion(newsId, delayMs))) return;
@@ -566,7 +770,7 @@ async function runDiscussion(newsId, news) {
     // The provider failed after all retries. Say it in the personality's own
     // voice once, keep the machine details behind an error button, and let the
     // other participants carry the discussion.
-    const failure = describeMeterlessFailure(result.error);
+    const failure = describeMeterlessFailure(result.error, picked.user.modelName);
     const strikes = (failuresByUser.get(picked.user.id) || 0) + 1;
     failuresByUser.set(picked.user.id, strikes);
     const cooldownMs = Math.min(
@@ -592,8 +796,12 @@ async function runDiscussion(newsId, news) {
 
 /**
  * Start AI discussion for a news item.
- * Returns { ok: true, aiParticipants } immediately, or a refusal with the HTTP
- * status the route should use. Replies are broadcast over the WebSocket.
+ *
+ * Only personalities whose model the Meterless Runtime can actually serve are
+ * given the news item, and at most `agentsPerNews` (1..5, default 1) of them
+ * are drawn at random for it. Returns { ok: true, … } immediately, or a refusal
+ * with the HTTP status the route should use. Replies are broadcast over the
+ * WebSocket.
  */
 async function startDiscussion(newsId) {
   if (typeof newsId !== 'string' || !newsId.trim()) {
@@ -617,48 +825,118 @@ async function startDiscussion(newsId) {
       status: 400,
       code: 'no_ai_users',
       error:
-        'No AI participants yet. Create an AI user under Users (with a personality and a meterless/* model), then start the discussion again.'
+        'No AI participants yet. Create an AI user under Users (with a personality and a model), then start the discussion again.'
     };
   }
 
   const existing = storage.discussions.get(newsId);
   if (existing?.active) {
-    return { ok: true, alreadyRunning: true, aiParticipants: aiUsers.length };
+    return {
+      ok: true,
+      alreadyRunning: true,
+      aiParticipants: discussionAgents(existing).length,
+      agentIds: existing.agentIds || []
+    };
+  }
+
+  // Only a real configuration gap removes a personality from the pool (a
+  // `cloud/` id without METERLESS_API_KEY). The runtime routes plain ids, so a
+  // model that is absent from its catalogue is still tried and its own error is
+  // shown instead of an invented "unknown model".
+  const usable = [];
+  const skippedAgents = [];
+
+  for (const user of aiUsers) {
+    const support = checkModelSupport(user.modelName);
+    if (support.ok) {
+      usable.push(user);
+    } else {
+      skippedAgents.push({
+        userId: user.id,
+        userName: user.name,
+        model: user.modelName || '',
+        reason: support.reason,
+        detail: support.detail
+      });
+      console.warn(`Skipping ${user.name} (${user.modelName}): ${support.detail}`);
+    }
+  }
+
+  if (usable.length === 0) {
+    const details = skippedAgents
+      .map(agent => `${agent.userName} (${agent.model}): ${agent.detail}`)
+      .join(' ');
+    return {
+      ok: false,
+      status: 409,
+      code: 'no_usable_models',
+      error: `No AI personality can be called. ${details}`,
+      skippedAgents
+    };
   }
 
   // Restarting must not look like a silent no-op: say exactly why nobody can
   // speak instead of starting and finishing a discussion in the same tick.
-  const allExhausted = aiUsers.every(user => {
+  const withBudget = usable.filter(user => {
     const settings = normalizeDiscussionSettings(user);
-    return messageCountFor(newsId, user.id) >= settings.maxMessagesPerNews;
+    return messageCountFor(newsId, user.id) < settings.maxMessagesPerNews;
   });
-  if (allExhausted) {
+
+  if (withBudget.length === 0) {
     return {
       ok: false,
       status: 409,
       code: 'message_limit_reached',
       error:
-        'Every AI already reached its "Max messages per news" limit on this news item. Raise that number under Users → Edit to continue the discussion.'
+        'Every AI that can speak here already reached its "Max messages per news" limit on this news item. Raise that number under Users → Edit to continue the discussion.'
     };
   }
+
+  const settings = currentSettings();
+  const roster = sampleAiUsers(withBudget, settings.agentsPerNews);
 
   const discussion = {
     active: true,
     startedAt: new Date().toISOString(),
     stoppedReason: null,
+    // The personalities that "see" this news item, frozen for this run.
+    agentIds: roster.map(user => user.id),
+    agentModels: roster.map(user => ({
+      id: user.id,
+      name: user.name,
+      model: user.modelName
+    })),
+    skippedAgents,
     // Memory-only per-discussion state for the runner.
     cooldowns: new Map(),
-    apologies: new Set()
+    apologies: new Set(),
+    failuresByUser: new Map()
   };
   storage.discussions.set(newsId, discussion);
-  broadcast('discussion_status', { newsId, active: true });
-
+  broadcast('discussion_status', {
+    newsId,
+    active: true,
+    agents: discussion.agentModels
+  });
   discussion.runner = runDiscussion(newsId, news).catch(error => {
     console.error(`Discussion runner failed for ${newsId}:`, error.message);
     finishDiscussion(newsId, 'error');
   });
 
-  return { ok: true, aiParticipants: aiUsers.length };
+  console.log(
+    `Discussion started for ${newsId}: ${discussion.agentModels
+      .map(agent => `${agent.name} (${agent.model})`)
+      .join(', ')}`
+  );
+
+  return {
+    ok: true,
+    aiParticipants: roster.length,
+    agentsPerNews: settings.agentsPerNews,
+    agentIds: discussion.agentIds,
+    agents: discussion.agentModels,
+    skippedAgents
+  };
 }
 
 // Stop AI discussion (a user action, or the end of an exhausted discussion).
@@ -704,7 +982,7 @@ async function addComment(newsId, userId, text, isAI = false, extra = {}) {
   }
 
   storage.comments.push(comment);
-  persist();
+  persist({ immediate: true });
   broadcast('new_comment', comment);
   return comment;
 }
@@ -966,7 +1244,14 @@ app.get('/api/news/:id', (req, res) => {
     ...news,
     comments,
     discussionActive: discussion?.active || false,
-    discussionStoppedReason: discussion?.stoppedReason || null
+    discussionStoppedReason: discussion?.stoppedReason || null,
+    // Which personalities "see" this news item right now.
+    discussionAgents: discussionAgents(discussion).map(user => ({
+      id: user.id,
+      name: user.name,
+      model: user.modelName
+    })),
+    discussionSkippedAgents: discussion?.skippedAgents || []
   });
 });
 
@@ -989,7 +1274,11 @@ app.post('/api/discussion/start', async (req, res) => {
   const result = await startDiscussion(req.body?.newsId);
 
   if (!result.ok) {
-    return res.status(result.status).json({ error: result.error, code: result.code });
+    return res.status(result.status).json({
+      error: result.error,
+      code: result.code,
+      skippedAgents: result.skippedAgents || []
+    });
   }
 
   res.status(202).json({
@@ -997,6 +1286,9 @@ app.post('/api/discussion/start', async (req, res) => {
     started: true,
     alreadyRunning: Boolean(result.alreadyRunning),
     aiParticipants: result.aiParticipants,
+    agentsPerNews: result.agentsPerNews,
+    agents: result.agents || [],
+    skippedAgents: result.skippedAgents || [],
     message: result.alreadyRunning
       ? 'The discussion is already running.'
       : `Discussion started. ${result.aiParticipants} AI participant(s) will answer over the WebSocket.`
@@ -1023,6 +1315,25 @@ app.delete('/api/meterless/log', (req, res) => {
   const newsId = typeof req.query.newsId === 'string' && req.query.newsId ? req.query.newsId : null;
   meterlessLog.clear({ newsId });
   res.json({ success: true });
+});
+
+// Which agent, with which model, is processing how many requests right now.
+// Diagnostics endpoint: `curl http://localhost:3001/api/activity`.
+app.get('/api/activity', (req, res) => {
+  res.json(activityPayload());
+});
+
+// Deployment-wide discussion settings: how many agents see one news item.
+app.get('/api/settings', (req, res) => {
+  res.json({ ...currentSettings(), limits: APP_SETTINGS_LIMITS });
+});
+
+app.put('/api/settings', (req, res) => {
+  const next = normalizeAppSettings({ ...storage.settings, ...(req.body || {}) });
+  storage.settings = next;
+  persist();
+  broadcast('settings_updated', next);
+  res.json({ ...next, limits: APP_SETTINGS_LIMITS });
 });
 
 // Manual news fetch: every source is polled, and the per-source result is returned.
@@ -1130,6 +1441,8 @@ const shutdown = (signal) => {
   console.log(`${signal} received, shutting down`);
   // Do not lose a debounced write on the way out.
   stateStore.flush();
+  meterlessLog.flush();
+  clearInterval(wsHeartbeat);
   wss.close();
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(1), 10000).unref();
@@ -1137,4 +1450,7 @@ const shutdown = (signal) => {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('exit', () => stateStore.flush());
+process.on('exit', () => {
+  stateStore.flush();
+  meterlessLog.flush();
+});

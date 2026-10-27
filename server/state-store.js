@@ -15,6 +15,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+const { normalizeAppSettings } = require('./app-settings');
+
 // Keep the file bounded: news and comments are append-only logs.
 const MAX_NEWS = 1000;
 const MAX_COMMENTS = 5000;
@@ -32,6 +34,8 @@ function emptyState() {
     users: [],
     news: [],
     comments: [],
+    // Deployment-wide discussion settings (how many agents see one news item).
+    settings: normalizeAppSettings(),
     updatedAt: null
   };
 }
@@ -54,6 +58,7 @@ function normalize(raw) {
   state.comments = asArray(raw.comments)
     .filter(comment => comment && typeof comment === 'object' && comment.id)
     .slice(-MAX_COMMENTS);
+  state.settings = normalizeAppSettings(raw.settings);
   state.updatedAt = typeof raw.updatedAt === 'string' ? raw.updatedAt : null;
   return state;
 }

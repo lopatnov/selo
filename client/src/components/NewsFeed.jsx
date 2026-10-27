@@ -2,7 +2,8 @@ import axios from 'axios';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
-import API_BASE, { WS_URL, getParticipant } from '../api';
+import API_BASE, { getParticipant } from '../api';
+import { subscribe } from '../ws';
 import MeterlessLogPanel from './MeterlessLogPanel';
 
 const DISCUSSION_STOP_REASONS = {
@@ -11,6 +12,12 @@ const DISCUSSION_STOP_REASONS = {
   ai_unavailable: 'Discussion stopped: the AI provider returned no answer three times in a row.',
   no_ai_users: 'Discussion stopped: no AI personalities are configured.',
   error: 'Discussion stopped after an internal error. Check the server log.'
+};
+
+// Which part of the Meterless record is currently expanded under a comment.
+const COMMENT_PANELS = {
+  ask: { label: '🧾 Ask', title: 'The exact prompt the model received' },
+  think: { label: '💭 Thinking', title: 'How the model reasoned before answering' }
 };
 
 function NewsFeed() {
@@ -24,23 +31,62 @@ function NewsFeed() {
   const [startingDiscussion, setStartingDiscussion] = useState({});
   const [logOpen, setLogOpen] = useState({});
   const [logEntries, setLogEntries] = useState({});
-  const [commentDetails, setCommentDetails] = useState({});
+  const [commentPanels, setCommentPanels] = useState({});
   const [detailsLoading, setDetailsLoading] = useState({});
   const [detailsError, setDetailsError] = useState({});
+  const [discussionAgents, setDiscussionAgents] = useState({});
+  const [skippedAgents, setSkippedAgents] = useState({});
   const [newCommentText, setNewCommentText] = useState('');
   const [participant, setParticipant] = useState(null);
-  const wsRef = useRef(null);
   const commentsEndRef = useRef(null);
 
   useEffect(() => {
     fetchNews();
     loadParticipant();
-    connectWebSocket();
-
-    return () => {
-      if (wsRef.current) wsRef.current.close();
-    };
   }, []);
+
+  // One shared socket for the whole app (see `ws.js`): this component only
+  // subscribes to the messages it cares about and never opens a connection.
+  useEffect(
+    () =>
+      subscribe((type, data) => {
+        switch (type) {
+          case 'news_updated':
+            setNews(Array.isArray(data) ? data : []);
+            break;
+          case 'new_comment':
+            setComments(prev => {
+              const thread = prev[data.newsId] || [];
+              // The REST fetch and the WebSocket can deliver the same comment;
+              // keep one copy so the thread never shows duplicates.
+              if (thread.some(comment => comment.id === data.id)) {
+                return prev;
+              }
+              return { ...prev, [data.newsId]: [...thread, data] };
+            });
+            scrollToBottom();
+            break;
+          case 'discussion_status':
+            setDiscussionActive(prev => ({ ...prev, [data.newsId]: Boolean(data.active) }));
+            setDiscussionReason(prev => ({ ...prev, [data.newsId]: data.active ? '' : data.reason || '' }));
+            if (data.active) setDiscussionError(prev => ({ ...prev, [data.newsId]: '' }));
+            if (Array.isArray(data.agents)) {
+              setDiscussionAgents(prev => ({ ...prev, [data.newsId]: data.agents }));
+            }
+            break;
+          case 'discussion_error':
+            if (!data?.newsId) break;
+            setDiscussionError(prev => ({ ...prev, [data.newsId]: data.error || 'The discussion could not start.' }));
+            if (Array.isArray(data.skippedAgents)) {
+              setSkippedAgents(prev => ({ ...prev, [data.newsId]: data.skippedAgents }));
+            }
+            break;
+          default:
+            break;
+        }
+      }),
+    []
+  );
 
   const fetchNews = async () => {
     try {
@@ -62,55 +108,6 @@ function NewsFeed() {
     }
   };
 
-  const connectWebSocket = () => {
-    wsRef.current = new WebSocket(WS_URL);
-    
-    wsRef.current.onopen = () => {
-      console.log('WebSocket connected');
-    };
-    
-    wsRef.current.onmessage = (event) => {
-      try {
-        const { type, data } = JSON.parse(event.data);
-        
-        switch (type) {
-          case 'news_updated':
-            setNews(data);
-            break;
-          case 'new_comment':
-            setComments(prev => {
-              const thread = prev[data.newsId] || [];
-              // The REST fetch and the WebSocket can deliver the same comment;
-              // keep one copy so the thread never shows duplicates.
-              if (thread.some(comment => comment.id === data.id)) {
-                return prev;
-              }
-              return { ...prev, [data.newsId]: [...thread, data] };
-            });
-            scrollToBottom();
-            break;
-          case 'discussion_status':
-            setDiscussionActive(prev => ({
-              ...prev,
-              [data.newsId]: data.active
-            }));
-            setDiscussionReason(prev => ({
-              ...prev,
-              [data.newsId]: data.active ? '' : data.reason || ''
-            }));
-            break;
-        }
-      } catch (error) {
-        console.error('WebSocket message error:', error);
-      }
-    };
-    
-    wsRef.current.onclose = () => {
-      console.log('WebSocket disconnected, reconnecting...');
-      setTimeout(connectWebSocket, 5000);
-    };
-  };
-
   const scrollToBottom = () => {
     setTimeout(() => {
       commentsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -118,7 +115,7 @@ function NewsFeed() {
   };
 
   const handleToggleNews = (newsId) => {
-    setExpandedNews(prev => prev === newsId ? null : newsId);
+    setExpandedNews(prev => (prev === newsId ? null : newsId));
     if (expandedNews !== newsId) {
       fetchNewsDetails(newsId);
     }
@@ -134,6 +131,11 @@ function NewsFeed() {
         [newsId]: response.data.discussionActive
           ? ''
           : response.data.discussionStoppedReason || ''
+      }));
+      setDiscussionAgents(prev => ({ ...prev, [newsId]: response.data.discussionAgents || [] }));
+      setSkippedAgents(prev => ({
+        ...prev,
+        [newsId]: response.data.discussionSkippedAgents || []
       }));
     } catch (error) {
       console.error('Failed to fetch news details:', error);
@@ -151,9 +153,15 @@ function NewsFeed() {
     try {
       const { data } = await axios.post(`${API_BASE}/discussion/start`, { newsId });
       setDiscussionActive(prev => ({ ...prev, [newsId]: true }));
+      setDiscussionAgents(prev => ({ ...prev, [newsId]: data?.agents || [] }));
+      setSkippedAgents(prev => ({ ...prev, [newsId]: data?.skippedAgents || [] }));
       if (data?.message) console.info(data.message);
     } catch (error) {
       console.error('Failed to start discussion:', error);
+      setSkippedAgents(prev => ({
+        ...prev,
+        [newsId]: error.response?.data?.skippedAgents || []
+      }));
       setDiscussionError(prev => ({
         ...prev,
         [newsId]:
@@ -178,43 +186,63 @@ function NewsFeed() {
     if (!newCommentText.trim() || !participant) return;
 
     try {
-      await axios.post(`${API_BASE}/comments`, {
+      const { data } = await axios.post(`${API_BASE}/comments`, {
         newsId,
         userId: participant.id,
         text: newCommentText.trim()
       });
       setNewCommentText('');
+
+      // Show the comment straight from the POST answer. Waiting for the
+      // `new_comment` broadcast made your own message invisible whenever the
+      // socket was reconnecting; the id check keeps a late broadcast from
+      // showing it twice.
+      if (data?.id) {
+        setComments(prev => {
+          const thread = prev[newsId] || [];
+          if (thread.some(comment => comment.id === data.id)) return prev;
+          return { ...prev, [newsId]: [...thread, data] };
+        });
+        scrollToBottom();
+      }
     } catch (error) {
       console.error('Failed to add comment:', error);
       alert(error.response?.data?.error || 'Failed to add comment.');
     }
   };
 
-  // Ask / thinking behind one AI comment is fetched on demand: the log entry
-  // holds the whole prompt, and the comment already shows the answer.
-  const handleToggleCommentDetails = async (newsId, comment) => {
-    const isOpen = Boolean(commentDetails[comment.id]);
-    setCommentDetails(prev => ({ ...prev, [comment.id]: !isOpen }));
-    if (isOpen || !comment.logEntryId) return;
-
-    const known = (logEntries[newsId] || []).find(entry => entry.id === comment.logEntryId);
-    if (known) return;
-
-    setDetailsLoading(prev => ({ ...prev, [comment.id]: true }));
-    setDetailsError(prev => ({ ...prev, [comment.id]: '' }));
+  const loadLogEntries = async (newsId, commentId) => {
+    setDetailsLoading(prev => ({ ...prev, [commentId]: true }));
+    setDetailsError(prev => ({ ...prev, [commentId]: '' }));
     try {
       const { data } = await axios.get(`${API_BASE}/meterless/log`, { params: { newsId } });
-      const list = Array.isArray(data.entries) ? data.entries : [];
-      setLogEntries(prev => ({ ...prev, [newsId]: list }));
+      setLogEntries(prev => ({ ...prev, [newsId]: Array.isArray(data.entries) ? data.entries : [] }));
     } catch (error) {
       setDetailsError(prev => ({
         ...prev,
-        [comment.id]:
+        [commentId]:
           error.response?.data?.error || error.message || 'Failed to load the prompt and thinking.'
       }));
     } finally {
-      setDetailsLoading(prev => ({ ...prev, [comment.id]: false }));
+      setDetailsLoading(prev => ({ ...prev, [commentId]: false }));
     }
+  };
+
+  /**
+   * The comment body is the answer; "ask" and "thinking" are toggles in its
+   * bottom-right corner. Only the opened part is fetched, once per news item.
+   */
+  const handleToggleCommentPanel = async (newsId, comment, panel) => {
+    const key = `${comment.id}:${panel}`;
+    const isOpen = Boolean(commentPanels[key]);
+    setCommentPanels(prev => ({ ...prev, [key]: !isOpen }));
+
+    if (isOpen || panel === 'error' || !comment.logEntryId) return;
+
+    const known = (logEntries[newsId] || []).some(entry => entry.id === comment.logEntryId);
+    if (known) return;
+
+    await loadLogEntries(newsId, comment.id);
   };
 
   const formatDate = (dateString) => {
@@ -276,7 +304,7 @@ function NewsFeed() {
                     <span className={`discussion-dot ${discussionActive[item.id] ? 'active' : 'inactive'}`}></span>
                     {discussionActive[item.id] ? '🟢 Discussion Active' : '⚪ Discussion Stopped'}
                   </span>
-                  
+
                   {discussionActive[item.id] ? (
                     <button
                       className="btn btn-danger"
@@ -293,11 +321,33 @@ function NewsFeed() {
                       {startingDiscussion[item.id] ? '⏳ Starting…' : '▶ Start Discussion'}
                     </button>
                   )}
+
+                  {(discussionAgents[item.id] || []).length > 0 && (
+                    <span className="news-agents" title="The agents that see this news item">
+                      👀 {(discussionAgents[item.id] || [])
+                        .map(agent => `${agent.name} · ${agent.model}`)
+                        .join(' / ')}
+                    </span>
+                  )}
                 </div>
 
                 {discussionError[item.id] && (
                   <div className="provider-alert error" style={{ margin: '0 1.25rem 1rem' }}>
                     {discussionError[item.id]}
+                  </div>
+                )}
+
+                {(skippedAgents[item.id] || []).length > 0 && (
+                  <div
+                    className="provider-alert warning"
+                    style={{ margin: '0 1.25rem 1rem' }}
+                    data-testid={`skipped-agents-${item.id}`}
+                  >
+                    Not taking part:{' '}
+                    {(skippedAgents[item.id] || [])
+                      .map(agent => `${agent.userName} (${agent.model})`)
+                      .join(', ')}
+                    . {skippedAgents[item.id][0]?.detail || 'Check the AI Provider settings.'}
                   </div>
                 )}
 
@@ -326,14 +376,18 @@ function NewsFeed() {
                   </div>
 
                   {logOpen[item.id] && <MeterlessLogPanel newsId={item.id} />}
-                  
+
                   <div className="discussion-comments">
                     {comments[item.id]?.length > 0 ? (
                       comments[item.id].map(comment => {
                         const entry =
                           (logEntries[item.id] || []).find(item2 => item2.id === comment.logEntryId) ||
                           null;
-                        const canOpen = Boolean(comment.logEntryId) || Boolean(comment.error);
+                        const canShowPrompt = Boolean(comment.logEntryId);
+                        const askKey = `${comment.id}:ask`;
+                        const thinkKey = `${comment.id}:think`;
+                        const errorKey = `${comment.id}:error`;
+                        const hasPanels = canShowPrompt || Boolean(comment.error);
 
                         return (
                           <div
@@ -353,30 +407,57 @@ function NewsFeed() {
                                 {formatDate(comment.timestamp)}
                               </span>
                             </div>
+
+                            {/* The answer itself is the message. */}
                             <div className="comment-text">{comment.text}</div>
 
-                            {canOpen && (
-                              <button
-                                type="button"
-                                className="comment-details-toggle"
-                                onClick={() => handleToggleCommentDetails(item.id, comment)}
-                                aria-expanded={Boolean(commentDetails[comment.id])}
-                              >
-                                {comment.error ? '⚠ Error details' : '🔎 Ask & thinking'}
-                              </button>
+                            {comment.error && (
+                              <div className="comment-footer">
+                                <button
+                                  type="button"
+                                  className={`comment-toggle ${commentPanels[errorKey] ? 'active' : ''}`}
+                                  onClick={() => handleToggleCommentPanel(item.id, comment, 'error')}
+                                  aria-expanded={Boolean(commentPanels[errorKey])}
+                                >
+                                  ⚠ Error details
+                                </button>
+                              </div>
                             )}
 
-                            {commentDetails[comment.id] && (
+                            {hasPanels && (
+                              <div className="comment-footer">
+                                {canShowPrompt &&
+                                  Object.entries(COMMENT_PANELS).map(([panel, config]) => (
+                                    <button
+                                      key={panel}
+                                      type="button"
+                                      className={`comment-toggle ${
+                                        commentPanels[`${comment.id}:${panel}`] ? 'active' : ''
+                                      }`}
+                                      title={config.title}
+                                      onClick={() => handleToggleCommentPanel(item.id, comment, panel)}
+                                      aria-expanded={Boolean(commentPanels[`${comment.id}:${panel}`])}
+                                    >
+                                      {config.label}
+                                    </button>
+                                  ))}
+                              </div>
+                            )}
+
+                            {comment.error && commentPanels[errorKey] && (
                               <div className="comment-details">
-                                {comment.error && (
-                                  <div className="comment-error">
-                                    <strong>{comment.error.code || 'error'}</strong>
-                                    {comment.error.message ? `: ${comment.error.message}` : ''}
-                                    {comment.error.attempts
-                                      ? ` · ${comment.error.attempts} attempt(s)`
-                                      : ''}
-                                  </div>
-                                )}
+                                <div className="comment-error">
+                                  <strong>{comment.error.code || 'error'}</strong>
+                                  {comment.error.message ? `: ${comment.error.message}` : ''}
+                                  {comment.error.attempts
+                                    ? ` · ${comment.error.attempts} attempt(s)`
+                                    : ''}
+                                </div>
+                              </div>
+                            )}
+
+                            {canShowPrompt && commentPanels[askKey] && (
+                              <div className="comment-details">
                                 {detailsError[comment.id] && (
                                   <div className="comment-error">{detailsError[comment.id]}</div>
                                 )}
@@ -384,7 +465,6 @@ function NewsFeed() {
                                   <div className="comment-details-note">Loading the prompt…</div>
                                 )}
                                 {!detailsLoading[comment.id] &&
-                                  comment.logEntryId &&
                                   !entry &&
                                   !detailsError[comment.id] && (
                                     <div className="comment-details-note">
@@ -397,13 +477,32 @@ function NewsFeed() {
                                       Ask — exactly what the model received
                                     </div>
                                     <pre className="provider-output">{entry.ask || '(empty)'}</pre>
+                                  </>
+                                )}
+                              </div>
+                            )}
+
+                            {canShowPrompt && commentPanels[thinkKey] && (
+                              <div className="comment-details">
+                                {detailsError[comment.id] && (
+                                  <div className="comment-error">{detailsError[comment.id]}</div>
+                                )}
+                                {detailsLoading[comment.id] && (
+                                  <div className="comment-details-note">Loading the reasoning…</div>
+                                )}
+                                {!detailsLoading[comment.id] &&
+                                  !entry &&
+                                  !detailsError[comment.id] && (
+                                    <div className="comment-details-note">
+                                      No Meterless log entry is available for this comment anymore.
+                                    </div>
+                                  )}
+                                {entry && (
+                                  <>
                                     <div className="provider-output-label">Thinking</div>
                                     <pre className="provider-output">
                                       {entry.think || '(no reasoning returned)'}
                                     </pre>
-                                    <div className="provider-output-label">
-                                      Answer — shown as the comment above
-                                    </div>
                                   </>
                                 )}
                               </div>

@@ -17,10 +17,41 @@ function UsersList() {
   const [draft, setDraft] = useState(null);
   const [saving, setSaving] = useState('');
   const [error, setError] = useState('');
+  // Deployment-wide setting: how many personalities may discuss one news item.
+  const [agentsPerNews, setAgentsPerNews] = useState(1);
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState('');
 
   useEffect(() => {
     fetchUsers();
+    fetchAppSettings();
   }, []);
+
+  const fetchAppSettings = async () => {
+    try {
+      const { data } = await axios.get(`${API_BASE}/settings`);
+      setAgentsPerNews(Number(data.agentsPerNews) || 1);
+    } catch (err) {
+      console.error('Failed to load the discussion settings:', err);
+    }
+  };
+
+  const handleAgentsPerNews = async (event) => {
+    const value = Number(event.target.value);
+    const previous = agentsPerNews;
+    setAgentsPerNews(value);
+    setSavingSettings(true);
+    setSettingsError('');
+    try {
+      const { data } = await axios.put(`${API_BASE}/settings`, { agentsPerNews: value });
+      setAgentsPerNews(Number(data.agentsPerNews) || value);
+    } catch (err) {
+      setAgentsPerNews(previous);
+      setSettingsError(readError(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
 
   const fetchUsers = async () => {
     try {
@@ -100,6 +131,32 @@ function UsersList() {
       <div className="card-header" style={{ paddingBottom: 0 }}>
         <h2 className="card-title">👥 Users / AI Personalities</h2>
         <Link to="/add-user" className="btn btn-primary">+ Add User</Link>
+      </div>
+
+      <div className="card agent-settings" data-testid="agent-settings">
+        <div className="agent-settings-row">
+          <div className="agent-settings-text">
+            <label htmlFor="agents-per-news">Agents per news</label>
+            <p className="agent-settings-hint">
+              How many different AI personalities may discuss one news item at the same time.
+              They are drawn at random for every discussion, so different articles get
+              different voices.
+            </p>
+          </div>
+          <select
+            id="agents-per-news"
+            value={agentsPerNews}
+            onChange={handleAgentsPerNews}
+            disabled={savingSettings}
+          >
+            {[1, 2, 3, 4, 5].map(value => (
+              <option key={value} value={value}>
+                {value}
+              </option>
+            ))}
+          </select>
+        </div>
+        {settingsError && <div className="provider-alert error">{settingsError}</div>}
       </div>
 
       {error && (

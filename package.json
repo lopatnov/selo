@@ -15,11 +15,13 @@
     "server:debug": "nodemon --inspect=9229 server/index.js",
     "client": "npm --prefix client start",
     "build": "npm --prefix client run build",
-    "test": "node --test server/providers/meterless-runtime.test.js server/zetaris.test.js server/load-env.test.js server/state-store.test.js server/meterless-text.test.js server/meterless-log.test.js server/discussion-settings.test.js",
+    "test": "node --test server/providers/meterless-runtime.test.js server/zetaris.test.js server/load-env.test.js server/state-store.test.js server/meterless-text.test.js server/meterless-log.test.js server/discussion-settings.test.js server/app-settings.test.js server/activity.test.js",
     "test:provider": "node --test server/providers/meterless-runtime.test.js",
     "test:zetaris": "node --test server/zetaris.test.js",
     "test:state": "node --test server/state-store.test.js",
     "verify:provider": "node scripts/verify-meterless-provider.cjs",
+    "verify:flow": "node scripts/verify-live-flow.cjs",
+    "test:e2e": "npm --prefix tests run test:feed",
     "check:connections": "node scripts/check-connections.cjs",
     "smoke": "node scripts/smoke-test.cjs",
     "install-all": "npm install && npm --prefix client install"
@@ -33,6 +35,7 @@
   },
   "devDependencies": {
     "concurrently": "^10.0.6",
-    "nodemon": "^3.1.14"
+    "nodemon": "^3.1.14",
+    "puppeteer": "^25.16.0"
   }
 }

@@ -12,6 +12,9 @@ import UsersList from './components/UsersList';
 /**
  * No authentication anywhere: News Feed, RSS Sources, Users, AI Provider.
  * There is no login route and no token in localStorage.
+ *
+ * The only WebSocket of the app belongs to the pages that need live updates
+ * (see `ws.js`), so one open page means exactly one socket connection.
  */
 function App() {
   return (
@@ -19,8 +22,10 @@ function App() {
       <header className="app-header">
         <h1>🤖 AI News Discussion</h1>
         <nav>
-          <Link to="/feed">News Feed</Link> |<Link to="/sources">RSS Sources</Link> |
-          <Link to="/users">Users</Link> |<Link to="/providers">AI Provider</Link>
+          <Link to="/feed">News Feed</Link>
+          <Link to="/sources">RSS Sources</Link>
+          <Link to="/users">Users</Link>
+          <Link to="/providers">AI Provider</Link>
         </nav>
       </header>
 

@@ -1,6 +1,9 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 const { MAX_TEXT_LENGTH, clampText, createMeterlessLog } = require('./meterless-log');
@@ -73,6 +76,57 @@ test('bearer tokens are redacted and long text is truncated', () => {
   const long = clampText('x'.repeat(MAX_TEXT_LENGTH + 10));
   assert.ok(long.length > MAX_TEXT_LENGTH);
   assert.match(long, /\[truncated\]$/);
+});
+
+test('an entry survives a restart when a file is given', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'selo-log-'));
+  const file = path.join(dir, 'meterless-log.json');
+
+  const first = createMeterlessLog({ limit: 10, file });
+  const entry = first.push({
+    newsId: 'n1',
+    userName: 'Alice',
+    model: 'meterless/auto',
+    ask: 'the prompt',
+    think: 'the reasoning',
+    answer: 'the answer'
+  });
+  first.flush();
+
+  // A fresh process reads the same file: this is what makes the Ask and
+  // Thinking toggles work after a restart.
+  const second = createMeterlessLog({ limit: 10, file });
+  const restored = second.list({ newsId: 'n1' });
+  assert.equal(restored.length, 1);
+  assert.equal(restored[0].id, entry.id);
+  assert.equal(restored[0].ask, 'the prompt');
+  assert.equal(restored[0].think, 'the reasoning');
+  assert.equal(restored[0].answer, 'the answer');
+
+  // New ids keep increasing across restarts.
+  const next = second.push({ newsId: 'n1', ask: 'again' });
+  assert.ok(next.id > entry.id);
+
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('clear is persisted too, and no file means a private in-memory log', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'selo-log-'));
+  const file = path.join(dir, 'meterless-log.json');
+
+  const first = createMeterlessLog({ limit: 10, file });
+  first.push({ newsId: 'n1', ask: 'a' });
+  first.clear({ newsId: 'n1' });
+  first.flush();
+  assert.equal(createMeterlessLog({ limit: 10, file }).list().length, 0);
+
+  // Without a file the log must not leak into the shared data directory.
+  const privateLog = createMeterlessLog({ limit: 10 });
+  privateLog.push({ newsId: 'n2', ask: 'b' });
+  privateLog.flush();
+  assert.equal(privateLog.list().length, 1);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('non-string fields do not break the record', () => {

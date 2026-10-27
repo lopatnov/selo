@@ -936,3 +936,88 @@ body {
     max-height: 200px;
   }
 }
+
+/* Deployment-wide discussion setting on the Users page */
+.agent-settings {
+  padding: 1rem 1.25rem;
+}
+
+.agent-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.agent-settings-text label {
+  display: block;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.agent-settings-hint {
+  margin-top: 0.25rem;
+  font-size: 0.85rem;
+  color: #7f8c8d;
+  line-height: 1.45;
+}
+
+.agent-settings select {
+  min-width: 4.5rem;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #fff;
+  font-size: 1rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* Comment footer: the answer is the message, ask/thinking live in the corner */
+.comment-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.35rem;
+  margin-top: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.comment-toggle {
+  padding: 0.2rem 0.6rem;
+  border: 1px solid #cfd9e3;
+  border-radius: 12px;
+  background: #fff;
+  color: #2c3e50;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.comment-toggle:hover {
+  border-color: #3498db;
+  color: #2980b9;
+}
+
+.comment-toggle.active {
+  background: #3498db;
+  border-color: #3498db;
+  color: #fff;
+}
+
+.news-agents {
+  font-size: 0.78rem;
+  color: #7f8c8d;
+  margin-left: auto;
+}
+
+@media (max-width: 900px) {
+  .agent-settings-row {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .news-agents {
+    margin-left: 0;
+  }
+}

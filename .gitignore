@@ -1,3 +1,6 @@
+# Isolated state copies used by scripts/verify-live-flow.cjs
+/.tmp-state/
+
 # Logs
 logs
 *.log
