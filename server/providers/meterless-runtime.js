@@ -94,6 +94,22 @@ function splitModelIds(ids) {
   return { routingModes, otherModels };
 }
 
+function firstString(...values) {
+  return values.find(value => typeof value === 'string') ?? '';
+}
+
+/**
+ * The completion tokens of a reply and whether they reached the cap. The runtime
+ * reports `finish_reason: "stop"` even when the cap cut the reply, so the token
+ * count is the main sign of a cut; an endpoint that says `"length"` is believed.
+ */
+function tokenUse(data, maxTokens) {
+  const used = data?.usage?.completion_tokens;
+  const completionTokens = Number.isFinite(used) ? used : null;
+  const capHit = completionTokens !== null && Number.isFinite(maxTokens) && completionTokens >= maxTokens;
+  return { completionTokens, truncated: capHit || data?.choices?.[0]?.finish_reason === 'length' };
+}
+
 /**
  * Map a raw class state to a stable { state, label } pair the UI can render.
  * The runtime's vocabulary is wider than the four buckets the contract keeps:
@@ -591,16 +607,13 @@ function createMeterlessRuntime(options = {}) {
       throw new ProviderError('invalid_response', 'Meterless Runtime returned no text content.');
     }
 
-    const reasoning =
-      typeof message?.reasoning_content === 'string'
-        ? message.reasoning_content
-        : typeof message?.reasoning === 'string'
-          ? message.reasoning
-          : typeof choice?.reasoning_content === 'string'
-            ? choice.reasoning_content
-            : '';
-
-    return { content, reasoning, model, durationMs: Date.now() - startedAt };
+    return {
+      content,
+      reasoning: firstString(message?.reasoning_content, message?.reasoning, choice?.reasoning_content),
+      model,
+      durationMs: Date.now() - startedAt,
+      ...tokenUse(data, body.max_tokens)
+    };
   }
 
   /**
@@ -779,6 +792,8 @@ function createMeterlessRuntime(options = {}) {
 }
 
 module.exports = {
+  firstString,
+  tokenUse,
   APP_HEADER,
   CHAT_SCOPE,
   CHAT_TIMEOUT_MS,
