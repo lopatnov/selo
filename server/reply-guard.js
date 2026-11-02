@@ -139,7 +139,7 @@ const PLANNING_VERBS = [
 
 const REASONING_PATTERNS = [
   /^(?:let me|let's) (?:analy[sz]e|parse|re-?read|break (?:this|it) down|start by (?:analy[sz]|re-?read|reading|looking))\b/i,
-  ...PLANNING_VERBS.map(verb => new RegExp(`${PLANNING_PREFIX}${verb}\\b`, 'i')),
+  ...PLANNING_VERBS.map(verb => new RegExp(String.raw`${PLANNING_PREFIX}${verb}\b`, 'i')),
   /^the (?:user|task|prompt|instructions?) (?:wants|is asking|asks|says|said|requires|states)\b/i,
   /^looking at (?:the|this) (?:discussion|news|conversation|messages?|prompt)\b/i,
   /^(?:analysis|reasoning|thinking|plan)\s*:/i
