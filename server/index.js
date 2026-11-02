@@ -14,6 +14,7 @@ const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { createZetarisStore } = require('./zetaris-store');
 const { createPersistence } = require('./persistence');
+const { adoptRecords } = require('./state-merge');
 const { sanitizeModelText } = require('./meterless-text');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
 const { createMeterlessLog, defaultLogFile } = require('./meterless-log');
@@ -111,7 +112,10 @@ const persistence = createPersistence({
     comments: storage.comments,
     settings: normalizeAppSettings(storage.settings),
     meterlessLog: meterlessLog.snapshot()
-  })
+  }),
+  // Zetaris answered after a failed start-up and holds records we never loaded:
+  // keep them instead of overwriting them with the first save.
+  adopt: (found, remoteState) => adoptRecords(storage, found, remoteState)
 });
 
 async function hydrateStorage() {

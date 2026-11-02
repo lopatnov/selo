@@ -16,8 +16,13 @@
  *   Zetaris empty, file has data  -> the file is migrated into Zetaris
  *   file newer than Zetaris       -> the file wins (Zetaris was down at the last save)
  *   otherwise                     -> Zetaris wins, the file is refreshed from it
- *   Zetaris unreachable           -> the file is used; the first later save that
- *                                    succeeds replaces the Zetaris copy with it
+ *   Zetaris unreachable           -> the file is used until Zetaris answers; before
+ *                                    the first save then, Zetaris is read once
+ *                                    more: records it holds that this server never
+ *                                    loaded are adopted (`adopt`), never overwritten
+ *
+ * The local file is written only when something changed, so a clean restart
+ * finds Zetaris at least as new as the file and loads from Zetaris.
  */
 
 const REMOTE_DEBOUNCE_MS = 1500;
@@ -34,6 +39,23 @@ function hasData(state) {
         state.news.length > 0 ||
         state.comments.length > 0)
   );
+}
+
+const COLLECTIONS = ['rssSources', 'users', 'news', 'comments'];
+
+/**
+ * The records in `remoteState` whose id this server does not hold, per
+ * collection, and how many there are.
+ */
+function remoteOnly(remoteState, current) {
+  const found = {};
+  let count = 0;
+  for (const name of COLLECTIONS) {
+    const known = new Set((current[name] ?? []).map(record => record.id));
+    found[name] = (remoteState[name] ?? []).filter(record => !known.has(record.id));
+    count += found[name].length;
+  }
+  return { found, count };
 }
 
 function unref(handle) {
@@ -53,11 +75,16 @@ function createPersistence({
   remoteDebounceMs = REMOTE_DEBOUNCE_MS,
   retryMs = RETRY_MS,
   bootTimeoutMs = BOOT_TIMEOUT_MS,
+  // Called with the records Zetaris holds that this server never loaded (see
+  // `remoteOnly`); it must add them to the live state. Without it such records
+  // pause saving instead of being overwritten.
+  adopt = null,
   logger = console
 }) {
   if (!local) throw new Error('Persistence needs a local state store.');
   if (typeof snapshot !== 'function') throw new Error('Persistence needs a snapshot() function.');
 
+  let hydrated = false;
   let remoteReady = false;
   let source = remote ? 'pending' : 'local';
   let dirty = false;
@@ -99,14 +126,36 @@ function createPersistence({
     }
   }
 
+  /**
+   * Zetaris answered for the first time since a failed start-up. Whatever it
+   * holds that this server does not is kept: adopted into the live state, or - if
+   * nothing can adopt it - saving stays paused rather than overwrite it.
+   */
+  function adoptRemoteRecords(remoteState) {
+    if (!remoteState) return;
+    const { found, count } = remoteOnly(remoteState, snapshot());
+    if (count === 0) return;
+
+    if (typeof adopt !== 'function') {
+      throw new Error(
+        `Zetaris holds ${count} record(s) this server has not loaded, so saving is paused ` +
+          'instead of overwriting them. Restart the server to load the Zetaris data.'
+      );
+    }
+    adopt(found, remoteState);
+    logger.warn(`Zetaris storage: adopted ${count} record(s) that Zetaris held and this server had not loaded.`);
+  }
+
   async function run() {
     do {
       rerun = false;
       dirty = false;
       try {
-        // Zetaris was unreachable at start-up: set the schema up on first contact.
+        // Zetaris was unreachable at start-up: set the schema up on first contact,
+        // and look at what it holds before the first save can replace it.
         if (!remoteReady) {
           await remote.ensureSchema();
+          adoptRemoteRecords(await remote.read());
           remoteReady = true;
           if (source === 'local-fallback') source = 'local-resynced';
         }
@@ -152,6 +201,15 @@ function createPersistence({
    * broken Zetaris degrades to the local file.
    */
   async function hydrate() {
+    try {
+      return await loadState();
+    } finally {
+      // Until now the live state is empty: nothing may be written from it.
+      hydrated = true;
+    }
+  }
+
+  async function loadState() {
     const localState = local.read();
     if (!remote) return { state: localState, source };
 
@@ -222,6 +280,7 @@ function createPersistence({
 
   /** A change happened. `immediate` is for data that cannot be regenerated. */
   function schedule({ immediate = false } = {}) {
+    if (!hydrated) return;
     local.write(snapshot());
     if (immediate) local.flush();
     if (remote) {
@@ -230,9 +289,14 @@ function createPersistence({
     }
   }
 
-  /** Write everything now. Used on shutdown; waits for Zetaris, but not for long. */
+  /**
+   * Write what is pending now. Used on shutdown; waits for Zetaris, but not for
+   * long. The local file is written only if a change is pending (a fresh
+   * timestamp on unchanged data would make the file look newer than Zetaris at
+   * the next start), and nothing is written before the state has been loaded.
+   */
   async function flush({ waitMs = SHUTDOWN_WAIT_MS } = {}) {
-    local.write(snapshot());
+    if (!hydrated) return;
     local.flush();
     if (!remote) return;
 

@@ -445,6 +445,10 @@ How it behaves:
   page shows the storage as `degraded`, and the save is retried every 30 s until
   it goes through. Nothing is lost. If the file is newer than Zetaris at the next
   start (Zetaris was down at the last save), the file wins and is sent to Zetaris.
+  If Zetaris comes back while the app is running, it is read once before the first
+  save: records it holds that this server never loaded are added to the app, not
+  overwritten. The local file is written only when something changed, so a clean
+  restart always loads from Zetaris.
 - **RSS** - the feeds are fetched by the app (a Zetaris REST table reads only JSON
   or CSV, not RSS/XML); the fetched news is saved to and loaded from Zetaris.
 - **Local only** - set `SELO_STORAGE=local` to skip Zetaris storage entirely.

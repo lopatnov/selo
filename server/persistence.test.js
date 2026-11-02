@@ -288,3 +288,98 @@ test('status describes where the data lives', async () => {
   assert.equal(status.localFile, 'memory://state.json');
   assert.deepEqual(status.tables, ['users']);
 });
+
+test('after a failed start-up, records Zetaris already has are not treated as news', async () => {
+  const stored = stateWith({ users: [{ id: 'u-1' }], updatedAt: '2026-05-01T00:00:00.000Z' });
+  const remote = fakeRemote({ stored, failSchema: 1 });
+  let adopted = 0;
+  const { persistence, live } = build({ remote, adopt: () => (adopted += 1) });
+  live.users.push({ id: 'u-1' });
+
+  const { source } = await persistence.hydrate();
+  assert.equal(source, 'local-fallback');
+
+  await wait(120);
+  assert.equal(adopted, 0, 'nothing to adopt');
+  assert.ok(remote.saves.length >= 1, 'the save goes through');
+  assert.equal(persistence.status().health, 'synced');
+});
+
+test('after a failed start-up, records only Zetaris has are adopted before the first save', async () => {
+  const stored = stateWith({
+    users: [{ id: 'u-1' }, { id: 'u-remote' }],
+    comments: [{ id: 'c-remote' }],
+    updatedAt: '2026-05-01T00:00:00.000Z'
+  });
+  const remote = fakeRemote({ stored, failSchema: 1 });
+  const calls = [];
+  const { persistence, live } = build({
+    remote,
+    snapshot: undefined,
+    adopt: (found, remoteState) => {
+      calls.push({ found, remoteState });
+      live.users.push(...found.users);
+    }
+  });
+  live.users.push({ id: 'u-1' });
+
+  await persistence.hydrate();
+  await wait(120);
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].found.users, [{ id: 'u-remote' }]);
+  assert.deepEqual(calls[0].found.comments, [{ id: 'c-remote' }]);
+  assert.deepEqual(calls[0].found.news, []);
+  assert.ok(remote.saves.length >= 1);
+  assert.deepEqual(remote.saves.at(-1).users.map(user => user.id), ['u-1', 'u-remote']);
+  assert.equal(persistence.status().health, 'synced');
+});
+
+test('without a way to adopt them, newer Zetaris records pause saving instead of being overwritten', async () => {
+  const stored = stateWith({ users: [{ id: 'u-remote' }], updatedAt: '2026-05-01T00:00:00.000Z' });
+  const remote = fakeRemote({ stored, failSchema: 1 });
+  const { persistence, local, live } = build({ remote });
+  live.users.push({ id: 'u-local' });
+
+  await persistence.hydrate();
+  persistence.schedule();
+  await wait(120);
+
+  assert.equal(remote.saves.length, 0, 'Zetaris is never written');
+  assert.equal(persistence.status().health, 'degraded');
+  assert.match(persistence.status().lastError, /saving is paused/);
+  assert.ok(local.writes >= 1, 'the local file still keeps every change');
+});
+
+test('flush leaves the local file alone when nothing changed', async () => {
+  const { persistence, local, live } = build({ remote: fakeRemote({ stored: null }) });
+  await persistence.hydrate();
+
+  await persistence.flush();
+  assert.equal(local.writes, 0, 'no fresh timestamp on unchanged data');
+
+  live.users.push({ id: 'u-1' });
+  persistence.schedule();
+  const writes = local.writes;
+  await persistence.flush();
+  assert.equal(writes, 1);
+  assert.ok(local.flushes >= 1, 'a pending change is written');
+});
+
+test('nothing is written before the state has been loaded', async () => {
+  const remote = fakeRemote({ stored: null });
+  const { persistence, local } = build({ remote });
+
+  persistence.schedule();
+  persistence.schedule({ immediate: true });
+  await persistence.flush();
+  await wait(30);
+
+  assert.equal(local.writes, 0);
+  assert.equal(local.flushes, 0);
+  assert.equal(remote.saves.length, 0);
+
+  await persistence.hydrate();
+  persistence.schedule();
+  assert.equal(local.writes, 1, 'writing starts once hydrate has finished');
+});
