@@ -116,13 +116,7 @@ const step = name => console.log(`\n== ${name}`);
 const ok = message => console.log(`PASS ${message}`);
 
 async function cleanup() {
-  await ALL_TABLE_NAMES.reduce(
-    (chain, table) =>
-      chain.then(() =>
-        zetaris.runSql(`DROP LIGHTNING DATABASE TABLE ${database}.${table}`).catch(() => {})
-      ),
-    Promise.resolve()
-  );
+  // Dropping a Lightning database removes its tables too.
   await zetaris.runSql(`DROP LIGHTNING DATABASE ${database}`).catch(() => {});
   await zetaris.deleteFiles([store.directory], { recursive: true }).catch(() => {});
 }

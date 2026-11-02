@@ -82,7 +82,7 @@ function createPersistence({
   logger = console
 }) {
   if (!local) throw new Error('Persistence needs a local state store.');
-  if (typeof snapshot !== 'function') throw new Error('Persistence needs a snapshot() function.');
+  if (typeof snapshot !== 'function') throw new TypeError('Persistence needs a snapshot() function.');
 
   let hydrated = false;
   let remoteReady = false;
@@ -136,14 +136,15 @@ function createPersistence({
     const { found, count } = remoteOnly(remoteState, snapshot());
     if (count === 0) return;
 
-    if (typeof adopt !== 'function') {
-      throw new Error(
-        `Zetaris holds ${count} record(s) this server has not loaded, so saving is paused ` +
-          'instead of overwriting them. Restart the server to load the Zetaris data.'
-      );
+    if (typeof adopt === 'function') {
+      adopt(found, remoteState);
+      logger.warn(`Zetaris storage: adopted ${count} record(s) that Zetaris held and this server had not loaded.`);
+      return;
     }
-    adopt(found, remoteState);
-    logger.warn(`Zetaris storage: adopted ${count} record(s) that Zetaris held and this server had not loaded.`);
+    throw new Error(
+      `Zetaris holds ${count} record(s) this server has not loaded, so saving is paused ` +
+        'instead of overwriting them. Restart the server to load the Zetaris data.'
+    );
   }
 
   async function run() {
