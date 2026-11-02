@@ -17,6 +17,7 @@ const { createPersistence } = require('./persistence');
 const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
 const { sanitizeModelText } = require('./meterless-text');
+const { askWithRepair, resolveReplyTokenCap } = require('./reply-guard');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
 const { createMeterlessLog, defaultLogFile } = require('./meterless-log');
 const { createActivityTracker } = require('./activity');
@@ -222,6 +223,8 @@ function logMeterlessCall(entry) {
 
 const AI_MAX_ATTEMPTS = 3;
 const AI_RETRY_DELAY_MS = 900;
+// `max_tokens` of a reply (SELO_MAX_REPLY_TOKENS, default 2000, 200 to 6000).
+const REPLY_TOKEN_CAP = resolveReplyTokenCap();
 // A rejected token or a missing key cannot be fixed by repeating the request.
 const AI_NON_RETRYABLE = new Set(['unauthorized', 'invalid_token', 'invalid_request']);
 
@@ -378,26 +381,26 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
 
     try {
       // Reasoning models spend tokens on the chain of thought before the answer,
-      // so a tight cap truncates them into "reasoning only" replies.
-      const result = await provider.chatDetailed({
-        model: providerModel,
-        messages,
-        max_tokens: 700,
-        temperature: 0.8
+      // so a tight cap cuts them off. The guard retries a cut or reasoning-only
+      // reply once with more room and shortens what is still cut.
+      const { answer, reasoning, reply } = await askWithRepair({
+        cap: REPLY_TOKEN_CAP,
+        instructions: system,
+        ask: cap =>
+          provider.chatDetailed({
+            model: providerModel,
+            messages,
+            max_tokens: cap,
+            temperature: 0.8
+          })
       });
-
-      // Reasoning may come as a separate field and/or inline in the content.
-      const { think, answer } = sanitizeModelText(result?.content);
-      const reasoning = [result?.reasoning, think]
-        .map(part => (typeof part === 'string' ? part.trim() : ''))
-        .filter(Boolean)
-        .join('\n\n');
 
       if (answer) {
         const entry = meterlessLog.push({
           ...record,
           think: reasoning,
           answer,
+          reply,
           durationMs: Date.now() - startedAt,
           error: null
         });

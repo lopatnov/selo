@@ -600,7 +600,22 @@ function createMeterlessRuntime(options = {}) {
             ? choice.reasoning_content
             : '';
 
-    return { content, reasoning, model, durationMs: Date.now() - startedAt };
+    // The runtime reports `finish_reason: "stop"` even when the cap cut the
+    // reply, so the only sign of a cut is the token count reaching the cap.
+    const completionTokens = Number.isFinite(data?.usage?.completion_tokens)
+      ? data.usage.completion_tokens
+      : null;
+    const cap = Number.isFinite(body.max_tokens) ? body.max_tokens : null;
+    const truncated = completionTokens !== null && cap !== null && completionTokens >= cap;
+
+    return {
+      content,
+      reasoning,
+      model,
+      durationMs: Date.now() - startedAt,
+      completionTokens,
+      truncated
+    };
   }
 
   /**

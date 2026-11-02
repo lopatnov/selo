@@ -461,6 +461,36 @@ test('chatDetailed keeps reasoning_content out of the answer and chat stays a st
   assert.equal(plain, 'A buyout offer would just be a distraction.');
 });
 
+test('chatDetailed reports the token count and flags a reply that reached the cap', async () => {
+  const bodies = [];
+  const usages = [{ completion_tokens: 700 }, { completion_tokens: 312 }, undefined];
+  const { runtime } = makeRuntime({
+    token: 'rt-good',
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return jsonResponse(200, {
+        // The runtime says "stop" even when the cap cut the reply.
+        choices: [{ finish_reason: 'stop', message: { content: 'The 30-day clock starts Monday, and if' } }],
+        usage: usages.shift()
+      });
+    }
+  });
+  const messages = [{ role: 'user', content: 'React' }];
+
+  const capped = await runtime.chatDetailed({ model: 'meterless/auto', messages, max_tokens: 700 });
+  assert.equal(capped.completionTokens, 700);
+  assert.equal(capped.truncated, true);
+  assert.equal(bodies[0].max_tokens, 700);
+
+  const finished = await runtime.chatDetailed({ model: 'meterless/auto', messages, max_tokens: 700 });
+  assert.equal(finished.completionTokens, 312);
+  assert.equal(finished.truncated, false);
+
+  const unknown = await runtime.chatDetailed({ model: 'meterless/auto', messages, max_tokens: 700 });
+  assert.equal(unknown.completionTokens, null);
+  assert.equal(unknown.truncated, false);
+});
+
 test('connect persists the base URL and token so a fresh process still sees them', () => {
   const dir = tempDir();
   const store = new SettingsStore(path.join(dir, 'settings.json'));

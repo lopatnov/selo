@@ -44,6 +44,21 @@ function clampText(value) {
   return text;
 }
 
+/**
+ * What the reply guard did to an answer (`cap`, `completionTokens`, `truncated`,
+ * `retried`, `trimmed`); `null` for a record that has none.
+ */
+function normalizeReply(reply) {
+  if (!reply || typeof reply !== 'object') return null;
+  return {
+    cap: Number.isFinite(reply.cap) ? reply.cap : null,
+    completionTokens: Number.isFinite(reply.completionTokens) ? reply.completionTokens : null,
+    truncated: reply.truncated === true,
+    retried: reply.retried === true,
+    trimmed: reply.trimmed === true
+  };
+}
+
 /** A saved record, from the file or from Zetaris, made safe to serve. */
 function normalizeEntry(entry, fallbackId) {
   return {
@@ -56,6 +71,7 @@ function normalizeEntry(entry, fallbackId) {
     ask: typeof entry.ask === 'string' ? entry.ask : '',
     think: typeof entry.think === 'string' ? entry.think : '',
     answer: typeof entry.answer === 'string' ? entry.answer : '',
+    reply: normalizeReply(entry.reply),
     error: typeof entry.error === 'string' ? entry.error : null
   };
 }
@@ -139,6 +155,7 @@ function createMeterlessLog({ limit = 200, file = null, onChange = null } = {}) 
       ask: clampText(entry.ask),
       think: clampText(entry.think),
       answer: clampText(entry.answer),
+      reply: normalizeReply(entry.reply),
       error: entry.error ? clampText(entry.error) : null
     };
 
