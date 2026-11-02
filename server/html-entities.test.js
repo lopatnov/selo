@@ -6,40 +6,54 @@ const Parser = require('rss-parser');
 
 const { decodeHtmlEntities, repairTitles } = require('./html-entities');
 
+/** Every [input, expected] pair must decode as written. */
+function assertDecodes(cases) {
+  for (const [input, expected] of cases) assert.equal(decodeHtmlEntities(input), expected, input);
+}
+
 test('numeric entities, decimal and hex, become the character', () => {
-  assert.equal(decodeHtmlEntities('It&#8217;s here'), 'It’s here');
-  assert.equal(decodeHtmlEntities('It&#x2019;s here'), 'It’s here');
-  assert.equal(decodeHtmlEntities('&#8220;Quoted&#8221;'), '“Quoted”');
-  assert.equal(decodeHtmlEntities('Cheese &#129472;'), 'Cheese 🧀');
+  assertDecodes([
+    ['It&#8217;s here', 'It’s here'],
+    ['It&#x2019;s here', 'It’s here'],
+    ['&#8220;Quoted&#8221;', '“Quoted”'],
+    ['Cheese &#129472;', 'Cheese 🧀']
+  ]);
 });
 
 test('the common named entities are decoded', () => {
-  assert.equal(decodeHtmlEntities('AT&amp;T &mdash; a &quot;deal&quot;&hellip;'), 'AT&T — a "deal"…');
-  assert.equal(decodeHtmlEntities('a&nbsp;b &lt;3 &gt;'), 'a b <3 >');
-  assert.equal(decodeHtmlEntities('Tom&apos;s caf&#233; &copy; 2026'), 'Tom\'s café © 2026');
+  assertDecodes([
+    ['AT&amp;T &mdash; a &quot;deal&quot;&hellip;', 'AT&T — a "deal"…'],
+    ['a&nbsp;b &lt;3 &gt;', 'a b <3 >'],
+    ['Tom&apos;s caf&#233; &copy; 2026', "Tom's café © 2026"]
+  ]);
 });
 
 test('decoding happens once, so an escaped entity is not decoded twice', () => {
-  assert.equal(decodeHtmlEntities('&amp;#8217;'), '&#8217;');
-  assert.equal(decodeHtmlEntities('&amp;lt;b&amp;gt;'), '&lt;b&gt;');
+  assertDecodes([
+    ['&amp;#8217;', '&#8217;'],
+    ['&amp;lt;b&amp;gt;', '&lt;b&gt;']
+  ]);
 });
 
-test('what is not a known entity stays as it was written', () => {
-  assert.equal(decodeHtmlEntities('Q&A; R&D; AT&T'), 'Q&A; R&D; AT&T');
-  assert.equal(decodeHtmlEntities('&unknownthing; &#; &#xZZ; &#99999999;'), '&unknownthing; &#; &#xZZ; &#99999999;');
-  assert.equal(decodeHtmlEntities('&constructor; &__proto__;'), '&constructor; &__proto__;');
-});
-
-test('control characters and surrogates are not decoded', () => {
-  assert.equal(decodeHtmlEntities('a&#0;b&#27;c&#xD800;d'), 'a&#0;b&#27;c&#xD800;d');
+test('what is not a known entity stays as it was written, and so do control characters and surrogates', () => {
+  for (const text of [
+    'Q&A; R&D; AT&T',
+    '&unknownthing; &#; &#xZZ; &#99999999;',
+    '&constructor; &__proto__;',
+    'a&#0;b&#27;c&#xD800;d'
+  ]) {
+    assertDecodes([[text, text]]);
+  }
 });
 
 test('anything that is not text becomes an empty string', () => {
-  assert.equal(decodeHtmlEntities(undefined), '');
-  assert.equal(decodeHtmlEntities(null), '');
-  assert.equal(decodeHtmlEntities(42), '');
-  assert.equal(decodeHtmlEntities(''), '');
-  assert.equal(decodeHtmlEntities('plain title'), 'plain title');
+  assertDecodes([
+    [undefined, ''],
+    [null, ''],
+    [42, ''],
+    ['', ''],
+    ['plain title', 'plain title']
+  ]);
 });
 
 test('a title from a real feed, escaped twice, comes out clean', async () => {
