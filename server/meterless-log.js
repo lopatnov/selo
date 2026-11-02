@@ -44,9 +44,52 @@ function clampText(value) {
   return text;
 }
 
-function createMeterlessLog({ limit = 200, file = null } = {}) {
+/** A saved record, from the file or from Zetaris, made safe to serve. */
+function normalizeEntry(entry, fallbackId) {
+  return {
+    id: Number.isInteger(entry.id) ? entry.id : fallbackId,
+    at: typeof entry.at === 'string' ? entry.at : new Date().toISOString(),
+    newsId: typeof entry.newsId === 'string' ? entry.newsId : null,
+    userName: typeof entry.userName === 'string' ? entry.userName : '',
+    model: typeof entry.model === 'string' ? entry.model : '',
+    durationMs: Number.isFinite(entry.durationMs) ? entry.durationMs : null,
+    ask: typeof entry.ask === 'string' ? entry.ask : '',
+    think: typeof entry.think === 'string' ? entry.think : '',
+    answer: typeof entry.answer === 'string' ? entry.answer : '',
+    error: typeof entry.error === 'string' ? entry.error : null
+  };
+}
+
+/** `{ sequence, entries }` from untrusted input; always a usable shape. */
+function normalizeLog(raw, limit = 200) {
+  const saved = (Array.isArray(raw?.entries) ? raw.entries : []).filter(
+    entry => entry && typeof entry === 'object'
+  );
+  const entries = [];
+  for (const entry of saved.slice(0, limit)) {
+    entries.push(normalizeEntry(entry, entries.length + 1));
+  }
+  const highest = entries.reduce((max, entry) => Math.max(max, entry.id), 0);
+  const savedSequence = Number.isInteger(raw?.sequence) ? raw.sequence : 0;
+  return { sequence: Math.max(highest, savedSequence), entries };
+}
+
+/**
+ * `onChange` is called after every push / clear, so the owner can copy the log
+ * somewhere else (the app sends it to Zetaris). `restore()` is the way back.
+ */
+function createMeterlessLog({ limit = 200, file = null, onChange = null } = {}) {
   const entries = [];
   let sequence = 0;
+
+  function notify() {
+    if (typeof onChange !== 'function') return;
+    try {
+      onChange();
+    } catch (error) {
+      console.error('Meterless log change hook failed:', error.message);
+    }
+  }
 
   function readFile() {
     if (!file) return;
@@ -61,27 +104,10 @@ function createMeterlessLog({ limit = 200, file = null } = {}) {
     }
 
     try {
-      const parsed = JSON.parse(raw);
-      const saved = Array.isArray(parsed?.entries) ? parsed.entries : [];
+      const saved = normalizeLog(JSON.parse(raw), limit);
       entries.length = 0;
-      for (const entry of saved.slice(0, limit)) {
-        if (!entry || typeof entry !== 'object') continue;
-        entries.push({
-          id: Number.isInteger(entry.id) ? entry.id : entries.length + 1,
-          at: typeof entry.at === 'string' ? entry.at : new Date().toISOString(),
-          newsId: typeof entry.newsId === 'string' ? entry.newsId : null,
-          userName: typeof entry.userName === 'string' ? entry.userName : '',
-          model: typeof entry.model === 'string' ? entry.model : '',
-          durationMs: Number.isFinite(entry.durationMs) ? entry.durationMs : null,
-          ask: typeof entry.ask === 'string' ? entry.ask : '',
-          think: typeof entry.think === 'string' ? entry.think : '',
-          answer: typeof entry.answer === 'string' ? entry.answer : '',
-          error: typeof entry.error === 'string' ? entry.error : null
-        });
-      }
-      const highest = entries.reduce((max, entry) => Math.max(max, entry.id), 0);
-      const savedSequence = Number.isInteger(parsed?.sequence) ? parsed.sequence : 0;
-      sequence = Math.max(highest, savedSequence);
+      entries.push(...saved.entries);
+      sequence = saved.sequence;
     } catch {
       console.warn('The Meterless log file is not valid JSON; starting empty.');
     }
@@ -121,7 +147,25 @@ function createMeterlessLog({ limit = 200, file = null } = {}) {
     // Written immediately: an entry is created once per model answer (rare),
     // and losing it means losing the only copy of the prompt and the reasoning.
     saveNow();
+    notify();
     return record;
+  }
+
+  /** The whole log, as saved: what the owner copies to Zetaris. */
+  function snapshot() {
+    return { sequence, entries: entries.slice() };
+  }
+
+  /**
+   * Replace the log with a copy loaded elsewhere (Zetaris). The local file is
+   * refreshed; `onChange` is not called, because nothing new happened.
+   */
+  function restore(saved) {
+    const next = normalizeLog(saved, limit);
+    entries.length = 0;
+    entries.push(...next.entries);
+    sequence = Math.max(sequence, next.sequence);
+    saveNow();
   }
 
   function list({ newsId = null, limit: max = null } = {}) {
@@ -139,6 +183,7 @@ function createMeterlessLog({ limit = 200, file = null } = {}) {
       }
     }
     saveNow();
+    notify();
   }
 
   /** Kept for callers that flush on shutdown; entries are already on disk. */
@@ -154,6 +199,8 @@ function createMeterlessLog({ limit = 200, file = null } = {}) {
     list,
     clear,
     flush,
+    snapshot,
+    restore,
     get size() {
       return entries.length;
     },
@@ -167,5 +214,6 @@ module.exports = {
   MAX_TEXT_LENGTH,
   clampText,
   createMeterlessLog,
-  defaultLogFile
+  defaultLogFile,
+  normalizeLog
 };

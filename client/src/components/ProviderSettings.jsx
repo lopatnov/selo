@@ -328,6 +328,38 @@ function ProviderSettings() {
           ? 'login (ZETARIS_USERNAME + ZETARIS_PASSWORD)'
           : 'not configured';
 
+  // Where the app's own data (news, comments, users, RSS sources, the Meterless
+  // log) is saved: tables in a Zetaris Lightning database, or a local file.
+  const storage = zetaris?.storage;
+  const storageDb = storage?.database || 'selo';
+  const storageSummary =
+    storage == null
+      ? '…'
+      : storage.backend === 'zetaris'
+        ? `Zetaris · database ${storage.database} · ${storage.health}` +
+          (storage.lastSavedAt ? ` · saved ${new Date(storage.lastSavedAt).toLocaleTimeString()}` : '')
+        : 'Local file only (Zetaris storage is off)';
+  const exampleQueries =
+    storage?.backend === 'zetaris'
+      ? [
+          {
+            label: 'Comments per participant',
+            sql: `SELECT user_name, count(*) AS comments FROM ${storageDb}.comments GROUP BY user_name ORDER BY comments DESC`
+          },
+          {
+            label: 'Most discussed news',
+            sql:
+              `SELECT n.title, count(*) AS comments FROM ${storageDb}.comments c ` +
+              `JOIN ${storageDb}.news n ON c.news_id = n.id GROUP BY n.title ORDER BY comments DESC LIMIT 10`
+          },
+          {
+            label: 'News per source',
+            sql: `SELECT source_name, count(*) AS news FROM ${storageDb}.news GROUP BY source_name ORDER BY news DESC`
+          },
+          { label: 'Tables', sql: `SHOW LIGHTNING TABLES ${storageDb}` }
+        ]
+      : [];
+
   return (
     <div>
       <div className="card-header" style={{ paddingBottom: 0 }}>
@@ -730,6 +762,13 @@ function ProviderSettings() {
           </div>
         )}
 
+        {storage?.health === 'degraded' && (
+          <div className="provider-alert warning" data-testid="zetaris-storage-alert">
+            Zetaris is not accepting the app&apos;s data right now ({storage.lastError}). Nothing is
+            lost: the local file keeps every change, and the save is retried automatically.
+          </div>
+        )}
+
         <dl className="provider-facts">
           <div>
             <dt>Status</dt>
@@ -738,6 +777,10 @@ function ProviderSettings() {
               {zetaris?.status?.latencyMs !== undefined ? ` · ${zetaris.status.latencyMs} ms` : ''}
               {zetaris?.status?.reason ? ` · ${zetaris.status.reason}` : ''}
             </dd>
+          </div>
+          <div>
+            <dt>App data</dt>
+            <dd data-testid="zetaris-storage">{storageSummary}</dd>
           </div>
           <div>
             <dt>REST URL</dt>
@@ -771,6 +814,23 @@ function ProviderSettings() {
             <small className="provider-hint">
               Only a single <code>SELECT</code>, <code>SHOW</code>, <code>DESCRIBE</code> or{' '}
               <code>WITH</code> statement is accepted here.
+              {exampleQueries.length > 0 && (
+                <>
+                  {' '}The app&apos;s own data is in the <code>{storageDb}</code> database. Try:{' '}
+                  {exampleQueries.map((example, index) => (
+                    <span key={example.label}>
+                      {index > 0 ? ' · ' : ''}
+                      <button
+                        type="button"
+                        className="btn-link"
+                        onClick={() => setZetarisSql(example.sql)}
+                      >
+                        {example.label}
+                      </button>
+                    </span>
+                  ))}
+                </>
+              )}
             </small>
           </div>
           <div className="provider-actions">

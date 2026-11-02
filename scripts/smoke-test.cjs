@@ -56,7 +56,8 @@ async function waitForServer(deadlineMs = 20000) {
 async function main() {
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
     cwd: path.join(__dirname, '..'),
-    env: { ...process.env, PORT: String(PORT), SELO_STATE_FILE: STATE_FILE },
+    // SELO_STORAGE=local: a smoke run must not write into the real Zetaris database.
+    env: { ...process.env, PORT: String(PORT), SELO_STATE_FILE: STATE_FILE, SELO_STORAGE: 'local' },
     stdio: ['ignore', 'pipe', 'pipe']
   });
 

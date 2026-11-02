@@ -40,7 +40,7 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
 2. **User/AI Management**: Users can create AI personalities with specific models (Meterless) and descriptions
 3. **Discussion System**: When "Start Discussion" is clicked, AI models generate responses to the news article
 4. **Real-time Updates**: WebSocket connections ensure real-time updates for comments and discussion status
-5. **Zetaris Storage**: News articles, comments, users, and RSS sources are stored in Zetaris database
+5. **Zetaris Storage**: RSS sources, news articles, comments, AI users and the Meterless request log are saved as tables in a Zetaris Lightning database (`selo`, created on first start), and the app reads them back from Zetaris at start-up. See [Our Application Data](#our-application-data)
 6. **Meterless AI Integration**: AI models generate responses based on prompts that include personality descriptions
 
 ---
@@ -114,7 +114,7 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   (`WebSocket #3 connected (1 open)` / `… closed (1006, 0 open)`), which makes a
   reconnect loop obvious. The client derives the URL from `REACT_APP_API_URL` in
   [`client/src/api.js`](client/src/api.js:5).
-- Comments and AI replies are persisted in `server/data/state.json`; **active
+- Comments and AI replies are saved in Zetaris (and mirrored in `server/data/state.json`); **active
   discussion timers are memory-only** and stop when the server restarts. A
   comment is written to disk immediately (an AI answer costs a model call), not
   when the debounce window happens to close.
@@ -216,7 +216,8 @@ There is no auth header anywhere; every route below is open by design.
 | `POST`         | `/api/discussion/start` / `/api/discussion/stop` | Start (`202`, non-blocking) or stop the AI loop for a `newsId`                                              |
 | `GET`          | `/api/meterless/log?newsId=…&limit=…`            | ask / think / answer records, newest first                                                                  |
 | `DELETE`       | `/api/meterless/log?newsId=…`                    | Clear the log (one news item, or all of it)                                                                 |
-| `GET`          | `/api/zetaris`                                   | Zetaris config plus live status                                                                             |
+| `GET`          | `/api/zetaris`                                   | Zetaris config, live status and where the app data is saved (`storage`)                                     |
+| `GET`          | `/api/storage`                                   | Storage backend (`zetaris` / `local`), database, health (`synced` / `pending` / `degraded`), last save      |
 | `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`                                                   |
 | `GET`          | `/api/providers/status`                          | Summary of both providers                                                                                   |
 | `GET`          | `/api/providers`                                 | Registered provider descriptors                                                                             |
@@ -403,32 +404,67 @@ All persistent data is stored in **Docker named volumes** managed by the Zetaris
 
 #### Our Application Data
 
-Zetaris exposes **SQL, not CRUD resources**: there is no `/users`, `/news` or
-`/comments` endpoint on a Zetaris instance. Its documented write/read surface is
-the SQL editor route (`POST <rest url>/sql-editor/sqls/run`), and its tables are
-CSV/filesystem-backed lightning tables, not a row-by-row application store.
+The app's data lives in Zetaris. A Zetaris instance has **no INSERT / UPDATE /
+DELETE** and no `/users`, `/news` or `/comments` REST resources, so the app uses
+the two things it does have:
 
-So the app owns its data in one JSON document and uses Zetaris as the
-SQL/analytics surface:
+- **write** - `POST <rest url>/ndp-files/save` puts a CSV file into the Zetaris
+  file store (`/file-store/selo/…`, written `dffs://selo/…` in SQL);
+- **read** - a Lightning file-store table is registered over each file, and the
+  app reads it with plain SQL through `POST <rest url>/sql-editor/sqls/run`.
 
-| Data Type                  | Stored In                                                                                                                   |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| **Meterless log**          | `server/data/meterless-log.json` — the 200 newest ask / think / answer records, so **Ask** / **Thinking** survive a restart |
-| **RSS Sources**            | `server/data/state.json` → `rssSources[]` — every feed in the list is polled                                                |
-| **Users/AI Personalities** | `server/data/state.json` → `users[]`                                                                                        |
-| **News Articles**          | `server/data/state.json` → `news[]` (newest 1000)                                                                           |
-| **Comments**               | `server/data/state.json` → `comments[]` (newest 5000)                                                                       |
-| **Discussion State**       | Server memory only — active timers die with the process                                                                     |
-| **Zetaris access**         | REST SQL: `GET /api/zetaris` (status), `POST /api/zetaris/query` (read-only `SELECT`/`SHOW`/`DESCRIBE`/`WITH`)              |
+**Nothing to prepare in Zetaris.** On first start the app creates the Lightning
+database (`selo`, or `ZETARIS_APP_DATABASE`), its folder, its files and its
+tables. That needs administrator rights, so use the API key of the Zetaris admin.
+It never overwrites a file that already exists.
 
-`server/data/` is in `.gitignore` and is the `server-data` Docker volume, so the
-feed list, the personalities and the discussion history survive a restart.
-`SELO_STATE_FILE` overrides the path. Writes are atomic (tmp file + rename) and
-debounced, and the file is flushed on `SIGTERM`/`SIGINT`.
+| Table           | Holds                                                         | Columns you can query                                                              |
+| --------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `rss_sources`   | every feed in the list                                        | id, name, url, created_at, last_fetched_at, last_item_count, last_error            |
+| `users`         | AI personalities and the local participant                    | id, name, role, model_name, is_ai, created_at                                      |
+| `news`          | articles (newest 1000)                                        | id, source_id, source_name, title, link, pub_date, fetched_at                      |
+| `comments`      | the discussion (newest 5000)                                  | id, news_id, user_id, user_name, is_ai, is_error, is_summary, text_length, created_at |
+| `meterless_log` | the 200 newest ask / think / answer records                   | id, at, news_id, user_name, model, duration_ms, error                              |
+| `app_state`     | participant, discussion settings, time of the last full save  | state_key, state_value                                                             |
+
+Every table also has `pos` (the order inside the collection) and `doc` (the
+complete record as JSON, which is what the app reads back). All values are text
+in SQL: use `CAST(… AS INT)` for numbers. Discussion timers are the one thing
+that stays in server memory - active timers die with the process.
+
+How it behaves:
+
+- **Start-up** - the app loads everything from Zetaris, which is the system of
+  record. If the Zetaris tables are empty and a `server/data/state.json` from an
+  earlier version exists, that data is moved into Zetaris automatically.
+- **Every change** - written to the local file at once and to Zetaris right after
+  (comments immediately, other changes in a short burst). Only the tables that
+  changed are uploaded.
+- **Zetaris unreachable** - the app keeps working from the local file
+  (`server/data/state.json`, the `server-data` Docker volume), the AI Provider
+  page shows the storage as `degraded`, and the save is retried every 30 s until
+  it goes through. Nothing is lost. If the file is newer than Zetaris at the next
+  start (Zetaris was down at the last save), the file wins and is sent to Zetaris.
+- **RSS** - the feeds are fetched by the app (a Zetaris REST table reads only JSON
+  or CSV, not RSS/XML); the fetched news is saved to and loaded from Zetaris.
+- **Local only** - set `SELO_STORAGE=local` to skip Zetaris storage entirely.
+
+Look at it with SQL on the AI Provider page (**Run query** has ready-made
+examples) or in the Zetaris SQL editor:
+
+```sql
+SELECT user_name, count(*) AS comments FROM selo.comments GROUP BY user_name ORDER BY comments DESC
+SELECT n.title, count(*) AS comments FROM selo.comments c JOIN selo.news n ON c.news_id = n.id GROUP BY n.title ORDER BY comments DESC LIMIT 10
+```
+
+Check the whole chain against your Zetaris with `npm run verify:storage`: it uses
+a throw-away database, saves awkward text (quotes, newlines, Cyrillic, emoji),
+reads it back, runs SQL over it and removes everything.
 
 Zetaris connectivity is real and visible: the AI Provider page shows `online` /
 `unauthorized` / `offline` / `not configured`, decided by running `SELECT 1`
-through the REST API.
+through the REST API, and a separate **App data** line says where the data is
+saved and whether the last save reached it.
 
 ---
 
@@ -453,7 +489,7 @@ by the app itself.**
 3. **Storage Flow**:
 
    ```
-   RSS feed → parser → dedupe by link → state.news[] (server/data/state.json)
+   RSS feed → parser → dedupe by link → news[] → Zetaris table selo.news (mirror: server/data/state.json)
                                       → broadcast news_updated over WebSocket
    ```
 
@@ -598,11 +634,13 @@ Consequences:
 | Meterless base URL and saved runtime token | `server/data/settings.json` (or `SELO_SETTINGS_FILE`)                                                                        | Yes; atomic write, chmod `0600` where supported |
 | Meterless models and status                | Page state only; fetched again on every load                                                                                 | No                                              |
 | Zetaris credentials                        | `.env` (`ZETARIS_API_KEY`, `ZETARIS_ORG_ID`, `ZETARIS_REST_URL`, `ZETARIS_BASE_URL`, `ZETARIS_USERNAME`, `ZETARIS_PASSWORD`) | Yes                                             |
-| RSS sources, users, news, comments         | `server/data/state.json` (or `SELO_STATE_FILE`)                                                                              | Yes                                             |
+| RSS sources, users, news, comments         | **Zetaris** tables in the `selo` database (`ZETARIS_APP_DATABASE`); mirrored in `server/data/state.json` (or `SELO_STATE_FILE`) | Yes; the mirror keeps the app working if Zetaris is down |
+| Meterless request log (Ask / Thinking)     | **Zetaris** table `selo.meterless_log`; mirrored in `server/data/meterless-log.json` (or `SELO_METERLESS_LOG_FILE`)           | Yes                                             |
 
 In Docker, `server/data` is the named volume `server-data` mounted at
 `/app/server/data`, so a save from the AI Provider page survives container
-recreation.
+recreation. See [Our Application Data](#our-application-data) for the Zetaris
+tables.
 
 Optional environment variables:
 
@@ -611,7 +649,9 @@ METERLESS_APP_ID=ai-news-discussion          # stable lowercase id sent as meter
 METERLESS_STATE_DIR=/path/to/runtime/state   # where the runtime writes proxy-token
 METERLESS_BASE_URL=http://127.0.0.1:8088/v1  # initial base URL (the UI can change it)
 SELO_SETTINGS_FILE=/path/to/settings.json    # provider settings, including the token
-SELO_STATE_FILE=/path/to/state.json          # RSS sources, users, news, comments
+SELO_STATE_FILE=/path/to/state.json          # local mirror of the app data (Zetaris holds the original)
+SELO_STORAGE=local                           # keep the app data only in the local file, no Zetaris storage
+ZETARIS_APP_DATABASE=selo                    # Zetaris Lightning database that holds the app data
 ```
 
 A runtime bound to `127.0.0.1` on the host is **not reachable from a container**.
@@ -648,7 +688,12 @@ it once when the API answers 401/403. Provider keys (`ZETARIS_*`,
 runs talk to the wrong port. `PORT` and the `SELO_*` paths keep plain dotenv
 semantics, so a harness can still inject them.
 
-The app talks to `POST <rest url>/sql-editor/sqls/run` with
+The key must belong to a Zetaris **administrator**: creating the `selo` Lightning
+database and its tables is an administrator-only operation. If the app cannot
+create them it keeps running on the local file and the AI Provider page says why.
+
+The app talks to `POST <rest url>/sql-editor/sqls/run` (SQL) and to
+`/ndp-files/save|list|createdir|delete` (files) with
 `Authorization: Bearer <key or ID token>`, `X-Org-ID: <numeric id>` and a fresh
 `X-Request-ID`. Two mistakes produce an HTTP 400 instead of a clear message, and
 both are handled explicitly:
@@ -668,7 +713,8 @@ statement; `POST /api/zetaris/query` refuses anything that is not a single
 Verification:
 
 ```bash
-npm test                  # unit tests: provider, Zetaris contract and state store
+npm test                  # unit tests: provider, Zetaris contract, Zetaris storage and state store
+npm run verify:storage    # live round trip of the app data through your Zetaris (throw-away database)
 npm run verify:provider   # live checks against a mock and, if present, a real runtime on 8088
 npm run check:connections # live Meterless Runtime + Zetaris probes using the real modules
 npm run smoke             # boots the API and checks the no-login flow end to end
@@ -728,7 +774,7 @@ npm run smoke             # boots the API and checks the no-login flow end to en
 
 - **Frontend**: React 19, React Router 7, Axios 1.x, CSS3 (built with react-scripts)
 - **Backend**: Node.js 24 LTS, Express 5, WebSocket (ws)
-- **Storage**: one JSON document (`server/data/state.json`) for RSS sources, users, news and comments; Zetaris is queried over its REST SQL API
+- **Storage**: Zetaris tables (CSV files written through the REST file API, read back with SQL) for RSS sources, users, news, comments and the Meterless log; a local JSON mirror (`server/data/state.json`) keeps the app working while Zetaris is down
 - **AI Integration**: Meterless Runtime provider + hosted Meterless API
 - **RSS Parsing**: rss-parser library
 - **Containerization**: Docker (multi-stage), nginx for the static client, Docker Compose
@@ -756,10 +802,12 @@ first use (`GET /api/participant`), so nothing has to be signed in.
 ├── server/             # Node.js Express server
 │   ├── index.js        # HTTP API, WebSocket hub, RSS polling, discussion loop
 │   ├── meterless-text.js # strips model reasoning (<think>) from replies
-│   ├── meterless-log.js  # in-memory ask / think / answer request log
-│   ├── zetaris.js      # Zetaris REST SQL client (POST /sql-editor/sqls/run)
+│   ├── meterless-log.js  # ask / think / answer request log (saved in Zetaris, mirrored in a file)
+│   ├── zetaris.js      # Zetaris REST client: SQL (POST /sql-editor/sqls/run) and files (/ndp-files/*)
+│   ├── zetaris-store.js # The app data as Zetaris tables: schema setup, save, load
+│   ├── persistence.js  # Zetaris first, local file as mirror and fallback; start-up reconciliation
 │   ├── zetaris.test.js # Contract unit tests
-│   ├── state-store.js  # Atomic, debounced JSON persistence (server/data/state.json)
+│   ├── state-store.js  # Atomic, debounced local JSON mirror (server/data/state.json)
 │   ├── state-store.test.js # Round-trip, corrupt-file and cap tests
 │   ├── providers/      # AI provider registry (Meterless Runtime + hosted Meterless)
 │   │   ├── routes.js   # /api/providers router
@@ -961,15 +1009,31 @@ Useful breakpoint locations:
 ### Inspect and reset the app state
 
 ```powershell
-# Show the persisted document (RSS sources, users, news, comments)
+# Show the local mirror of the app data (Zetaris holds the original)
 Get-Content .\server\data\state.json
 
-# Reset local state: stop the server first, then delete the file
+# Reset the local mirror: stop the server first, then delete the file
 Remove-Item .\server\data\state.json
 ```
 
+Deleting the file does **not** reset the app: Zetaris still holds the data and the
+next start loads it from there. To start from nothing, drop the database in the
+Zetaris SQL editor **and** delete its files (dropping a table only unregisters it;
+the CSV files stay in the file store, and the app never overwrites an existing
+file). The app creates everything again on the next start:
+
+```sql
+DROP LIGHTNING DATABASE TABLE selo.rss_sources
+-- … the same for users, news, comments, meterless_log, app_state, then:
+DROP LIGHTNING DATABASE selo
+```
+
+Then delete the folder `selo` under **NDP File System → file-store** in the
+Zetaris UI.
+
 `SELO_STATE_FILE` points the server at a different file. The smoke test always
-uses a temporary file and never touches `server/data/state.json`.
+uses a temporary file, runs with `SELO_STORAGE=local`, and never touches
+`server/data/state.json` or the Zetaris database.
 
 ### Debugging inside Docker
 
@@ -1004,7 +1068,8 @@ not reachable from inside a container.
 | Unit and contract tests (`node:test`) | `npm test`                              | none — mocks and loopback only                                                                   |
 | Provider contract only                | `npm run test:provider`                 | none                                                                                             |
 | Zetaris contract only                 | `npm run test:zetaris`                  | none                                                                                             |
-| State store only                      | `npm run test:state`                    | none                                                                                             |
+| State store, Zetaris store, persistence | `npm run test:state`                  | none (fake Zetaris)                                                                              |
+| Zetaris storage, live                 | `npm run verify:storage`                | `.env` with Zetaris online and an administrator key; uses a throw-away database                  |
 | Smoke test                            | `npm run smoke`                         | `.env` with a runtime and Zetaris both online; boots the API on port 3155 with a temp state file |
 | Provider live checks                  | `npm run verify:provider`               | mock runtime on port 18090; probes a real runtime on 8088 if one is listening                    |
 | Connection checks                     | `npm run check:connections`             | real Meterless Runtime and Zetaris from `.env`                                                   |

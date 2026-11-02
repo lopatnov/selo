@@ -234,6 +234,10 @@ services:
       ZETARIS_URL: ${SERVER_ZETARIS_URL:-http://api:8888}
       ZETARIS_API_KEY: ${ZETARIS_API_KEY:-}
       ZETARIS_ORG_ID: ${ZETARIS_ORG_ID:-1}
+      # The app's own data lives in this Lightning database (created on first
+      # start). SELO_STORAGE=local would keep it in the local JSON file only.
+      ZETARIS_APP_DATABASE: ${ZETARIS_APP_DATABASE:-selo}
+      SELO_STORAGE: ${SELO_STORAGE:-zetaris}
 
       # Meterless AI (hosted endpoint for non meterless/* model ids). The same
       # METERLESS_API_KEY is the Meterless Runtime token, so the runtime provider

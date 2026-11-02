@@ -35,6 +35,8 @@ function startServer() {
       ...process.env,
       PORT: String(PORT),
       SELO_STATE_FILE: stateFile,
+      // A verification run must not write into the real Zetaris database.
+      SELO_STORAGE: 'local',
       SELO_METERLESS_LOG_FILE: path.join(stateDir, 'meterless-log.json'),
       NODE_ENV: 'test'
     },

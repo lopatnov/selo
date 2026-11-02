@@ -86,9 +86,13 @@ function createStateStore(filePath = defaultStateFile()) {
     }
   }
 
-  function writeNow(state) {
+  /**
+   * `keepTimestamp` is for mirroring a copy that has its own `updatedAt` (the
+   * Zetaris one), so the mirror is not made to look newer than its source.
+   */
+  function writeNow(state, { keepTimestamp = false } = {}) {
     const payload = normalize(state);
-    payload.updatedAt = new Date().toISOString();
+    if (!(keepTimestamp && payload.updatedAt)) payload.updatedAt = new Date().toISOString();
 
     fs.mkdirSync(path.dirname(filePath), { recursive: true });
     const tmp = `${filePath}.${process.pid}.tmp`;

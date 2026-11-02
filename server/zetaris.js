@@ -3,7 +3,7 @@
 /**
  * Zetaris Lightning REST client.
  *
- * The only supported contract is the SQL editor route:
+ * Two documented contracts are used. The SQL editor route:
  *
  *   POST <rest url>/sql-editor/sqls/run
  *     Authorization: Bearer <api key or ID token>
@@ -19,9 +19,13 @@
  *      ID token with `POST <ZETARIS_BASE_URL>/api/auth/login`, cached until it
  *      expires and refreshed once if the API answers 401/403.
  *
+ * and the NDP file routes (`/ndp-files/save|list|createdir|delete`), which is
+ * how files reach the Zetaris file store.
+ *
  * There is no `/users`, `/news` or `/comments` REST resource on a Zetaris
- * instance: the app keeps its own collections in memory and uses Zetaris as the
- * SQL/analytics surface. Anything else is a guess, so it is not built here.
+ * instance and no INSERT/UPDATE/DELETE: rows are written as files and read
+ * back through file-store tables (see `zetaris-store.js`). Anything else is a
+ * guess, so it is not built here.
  */
 
 const { randomUUID } = require('node:crypto');
@@ -32,6 +36,7 @@ const DEFAULT_REST_URL = 'http://127.0.0.1:8888/api/v1.0';
 const DEFAULT_UI_URL = 'http://localhost:3000';
 const DEFAULT_ORG_ID = '1';
 const QUERY_TIMEOUT_MS = 120_000;
+const FILE_TIMEOUT_MS = 60_000;
 const LOGIN_TIMEOUT_MS = 30_000;
 const DEFAULT_LIMIT = 100;
 // Refresh a login token slightly before it expires instead of on the 401.
@@ -287,30 +292,29 @@ function createZetaris(options = {}) {
       : base;
   }
 
-  async function runSql(sql, { limit = DEFAULT_LIMIT } = {}) {
-    const statement = clean(sql);
-    if (!statement) throw new ZetarisError('invalid_request', 'SQL statement is required.');
-
-    const body = JSON.stringify({
-      queryId: randomUUID(),
-      sql: statement,
-      source: 'SqlEditor',
-      limit
-    });
+  /**
+   * One authorised request. Shared by the SQL route and the file routes so
+   * they agree on auth, the single 401 retry for a login token, and how a
+   * failure is reported. Resolves with the response body text.
+   */
+  async function call(path, { method = 'GET', body, search, timeoutMs = QUERY_TIMEOUT_MS } = {}) {
+    const url = `${baseUrl()}${path}${search ? `?${search}` : ''}`;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       // A missing key/credentials or a non-numeric org id is a configuration
       // error, not an unreachable server, so it surfaces before any request.
       const credentials = await auth();
       const headers = authorizedHeaders(credentials.token);
+      // A multipart body needs the boundary fetch generates, not our JSON type.
+      if (body instanceof FormData) delete headers['Content-Type'];
 
       let response;
       try {
-        response = await fetchImpl(`${baseUrl()}/sql-editor/sqls/run`, {
-          method: 'POST',
+        response = await fetchImpl(url, {
+          method,
           headers,
-          body,
-          signal: AbortSignal.timeout(QUERY_TIMEOUT_MS)
+          ...(body === undefined ? {} : { body }),
+          signal: AbortSignal.timeout(timeoutMs)
         });
       } catch (error) {
         throw new ZetarisError('offline', unreachableMessage(error), { cause: error });
@@ -350,32 +354,116 @@ function createZetaris(options = {}) {
         );
       }
 
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (error) {
-        throw new ZetarisError('invalid_response', 'Zetaris answered with invalid JSON.', {
-          cause: error
-        });
-      }
-
-      const rows = Array.isArray(data?.data) ? data.data : null;
-      if (!rows) {
-        throw new ZetarisError('invalid_response', 'Zetaris answered without a data array.', {
-          status: response.status
-        });
-      }
-
-      return {
-        headers: Array.isArray(data.headers) ? data.headers : [],
-        rows,
-        total: typeof data.total === 'number' ? data.total : rows.length,
-        timeUsedMs: typeof data.timeUsed === 'number' ? data.timeUsed : null
-      };
+      return { status: response.status, text };
     }
 
     // Unreachable: the loop either returns or throws.
     throw new ZetarisError('unauthorized', 'Zetaris refused the bearer token.');
+  }
+
+  function parseJson(text, what) {
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      throw new ZetarisError('invalid_response', `Zetaris answered with invalid JSON (${what}).`, {
+        cause: error
+      });
+    }
+  }
+
+  async function runSql(sql, { limit = DEFAULT_LIMIT } = {}) {
+    const statement = clean(sql);
+    if (!statement) throw new ZetarisError('invalid_request', 'SQL statement is required.');
+
+    const { status, text } = await call('/sql-editor/sqls/run', {
+      method: 'POST',
+      body: JSON.stringify({
+        queryId: randomUUID(),
+        sql: statement,
+        source: 'SqlEditor',
+        limit
+      })
+    });
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (error) {
+      throw new ZetarisError('invalid_response', 'Zetaris answered with invalid JSON.', {
+        cause: error
+      });
+    }
+
+    const rows = Array.isArray(data?.data) ? data.data : null;
+    if (!rows) {
+      throw new ZetarisError('invalid_response', 'Zetaris answered without a data array.', {
+        status
+      });
+    }
+
+    return {
+      headers: Array.isArray(data.headers) ? data.headers : [],
+      rows,
+      total: typeof data.total === 'number' ? data.total : rows.length,
+      timeUsedMs: typeof data.timeUsed === 'number' ? data.timeUsed : null
+    };
+  }
+
+  /**
+   * Zetaris has no INSERT/UPDATE/DELETE. Data is written as files into the NDP
+   * file system (`POST /ndp-files/save`, multipart: `path` + `files`) and read
+   * back through a Lightning file-store table registered over that file.
+   * `/file-store/<dir>/<name>` here is `dffs://<dir>/<name>` in SQL.
+   */
+  async function saveFile(directory, fileName, content, { contentType = 'text/csv' } = {}) {
+    const form = new FormData();
+    form.append('path', clean(directory));
+    form.append('files', new Blob([content], { type: contentType }), fileName);
+
+    const { text } = await call('/ndp-files/save', {
+      method: 'POST',
+      body: form,
+      timeoutMs: FILE_TIMEOUT_MS
+    });
+
+    // 200 with {"results":[{"SaveSuccess":{...}}]}; a failed file is reported inside.
+    const payload = parseJson(text, 'file save');
+    const results = Array.isArray(payload?.results) ? payload.results : [];
+    const failed = results.find(result => !result?.SaveSuccess);
+    if (failed || results.length === 0) {
+      throw new ZetarisError(
+        'write_failed',
+        `Zetaris did not save ${directory}/${fileName}: ${JSON.stringify(failed || results).slice(0, 200)}`
+      );
+    }
+  }
+
+  /** Entries of a directory (`FileInfo[]`); a missing directory answers HTTP 400. */
+  async function listFiles(directory) {
+    const { text } = await call('/ndp-files/list', {
+      search: new URLSearchParams({ path: clean(directory) }).toString(),
+      timeoutMs: FILE_TIMEOUT_MS
+    });
+    const entries = parseJson(text, 'file list');
+    return Array.isArray(entries) ? entries : [];
+  }
+
+  async function createDirectory(directory) {
+    await call('/ndp-files/createdir', {
+      method: 'POST',
+      body: JSON.stringify({ path: clean(directory) }),
+      timeoutMs: FILE_TIMEOUT_MS
+    });
+  }
+
+  async function deleteFiles(paths, { recursive = false } = {}) {
+    const search = new URLSearchParams();
+    for (const path of paths) search.append('paths', path);
+    await call(recursive ? '/ndp-files/delete/all' : '/ndp-files/delete', {
+      method: 'DELETE',
+      search: search.toString(),
+      timeoutMs: FILE_TIMEOUT_MS
+    });
   }
 
   /**
@@ -461,6 +549,10 @@ function createZetaris(options = {}) {
     descriptor: getConfig,
     getConfig,
     runSql,
+    saveFile,
+    listFiles,
+    createDirectory,
+    deleteFiles,
     probe,
     listDatabases
   };

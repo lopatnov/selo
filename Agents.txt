@@ -18,7 +18,7 @@ AI Personalities:
 Technologies:
 - Frontend: React 18, React Router, Axios
 - Backend: Node.js, Express, WebSocket
-- Storage: server memory; Zetaris is queried over its REST SQL API
+- Storage: Zetaris tables (files via the REST file API, read back with SQL); a local JSON file mirrors them as a fallback
 - AI: Meterless Runtime provider + hosted Meterless API
 - Containerization: Docker, Docker Compose
 
