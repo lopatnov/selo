@@ -115,7 +115,7 @@ function makeClasses(overrides = {}) {
   };
 }
 
-function zetarisPayload() {
+function zetarisPayload(overrides = {}) {
   return {
     restUrl: 'http://127.0.0.1:8888',
     orgId: '1',
@@ -124,7 +124,15 @@ function zetarisPayload() {
       status: 'online',
       latencyMs: 5,
       reason: ''
-    }
+    },
+    storage: {
+      backend: 'zetaris',
+      database: 'selo',
+      health: 'synced',
+      lastSavedAt: null,
+      lastError: null
+    },
+    ...overrides
   };
 }
 
@@ -298,6 +306,46 @@ test('explains the Connect link and stores it without echoing the secret', async
   expect(
     state.requests.some(entry => entry.method === 'POST' && entry.path === '/meterless/connect')
   ).toBe(true);
+});
+
+test('shows where the app data is saved and offers SQL over it', async ({ page }) => {
+  await installProviderMocks(page, { config: offlineConfig(), models: offlineModels() });
+
+  await page.goto('/providers');
+
+  await expect(page.getByTestId('zetaris-storage')).toHaveText('Zetaris · database selo · synced');
+  await expect(page.getByTestId('zetaris-storage-alert')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Comments per participant' }).click();
+  await expect(page.locator('#zetaris-sql')).toHaveValue(
+    /FROM selo\.comments GROUP BY user_name/
+  );
+});
+
+test('says so when Zetaris is not accepting the app data, and that nothing is lost', async ({
+  page
+}) => {
+  await installProviderMocks(page, { config: offlineConfig(), models: offlineModels() });
+  // Registered after the default mock, so it answers first.
+  await page.route('**/api/zetaris', route =>
+    route.fulfill({
+      json: zetarisPayload({
+        storage: {
+          backend: 'zetaris',
+          database: 'selo',
+          health: 'degraded',
+          lastSavedAt: null,
+          lastError: 'Could not reach Zetaris'
+        }
+      })
+    })
+  );
+
+  await page.goto('/providers');
+
+  await expect(page.getByTestId('zetaris-storage')).toHaveText('Zetaris · database selo · degraded');
+  await expect(page.getByTestId('zetaris-storage-alert')).toContainText('Could not reach Zetaris');
+  await expect(page.getByTestId('zetaris-storage-alert')).toContainText('Nothing is lost');
 });
 
 test('Auto Detect saves the discovered runtime and reports the detection result', async ({
