@@ -48,11 +48,11 @@ function endsComplete(text) {
 }
 
 // Words a finished sentence does not end on ("... and if", "... can share a").
-const DANGLING_WORDS = new Set([
-  ...['a', 'an', 'the', 'and', 'or', 'but', 'if', 'when', 'while', 'because', 'although', 'though'],
-  ...['unless', 'until', 'of', 'with', 'from', 'as', 'than', 'which', 'whose'],
-  ...['my', 'your', 'our', 'their', 'its']
-]);
+const DANGLING_WORDS = new Set(
+  'a an the and or but if when while because although though unless until of with from as than which whose my your our their its'.split(
+    ' '
+  )
+);
 
 /** Does the text stop on a comma, a dash or a word that needs a continuation? */
 function endsDangling(text) {
@@ -126,9 +126,20 @@ function shortenToCompleteSentence(text, minKept = MIN_KEPT_CHARS) {
 // in-character reply, so they are not here.
 // Only planning verbs count: "So I have to ask ..." or "Let me think ..." are
 // things a personality says.
+const PLANNING_PREFIX = '^(?:(?:first|so|okay|ok),? )?(?:i|we) (?:need|must|should|have) to ';
+const PLANNING_VERBS = [
+  'analy[sz]e',
+  'figure out',
+  'craft',
+  'react as',
+  'respond as',
+  'consider (?:the|what)',
+  'write (?:a|the|my) (?:reply|response|comment|reaction)'
+];
+
 const REASONING_PATTERNS = [
   /^(?:let me|let's) (?:analy[sz]e|parse|re-?read|break (?:this|it) down|start by (?:analy[sz]|re-?read|reading|looking))\b/i,
-  /^(?:(?:first|so|okay|ok),? )?(?:i|we) (?:need|must|should|have) to (?:analy[sz]e|figure out|craft|write (?:a|the|my) (?:reply|response|comment|reaction)|react as|respond as|consider (?:the|what))\b/i,
+  ...PLANNING_VERBS.map(verb => new RegExp(`${PLANNING_PREFIX}${verb}\\b`, 'i')),
   /^the (?:user|task|prompt|instructions?) (?:wants|is asking|asks|says|said|requires|states)\b/i,
   /^looking at (?:the|this) (?:discussion|news|conversation|messages?|prompt)\b/i,
   /^(?:analysis|reasoning|thinking|plan)\s*:/i
