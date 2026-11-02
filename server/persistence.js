@@ -44,8 +44,23 @@ function hasData(state) {
 const COLLECTIONS = ['rssSources', 'users', 'news', 'comments'];
 
 /**
+ * The Meterless log entries Zetaris holds that this server does not. Log ids are
+ * a per-machine counter, so an entry is identified by its id *and* time. A log
+ * that is full has dropped its oldest entries on its own: those are not missing.
+ */
+function remoteOnlyLog(remoteLog, localLog) {
+  const local = localLog?.entries ?? [];
+  const known = new Set(local.map(entry => `${entry.id}|${entry.at}`));
+  const full = local.length > 0 && local.length >= (localLog?.limit ?? Infinity);
+  const oldest = full ? Math.min(...local.map(entry => entry.id)) : -Infinity;
+  return (remoteLog?.entries ?? []).filter(
+    entry => !known.has(`${entry.id}|${entry.at}`) && entry.id >= oldest
+  );
+}
+
+/**
  * The records in `remoteState` whose id this server does not hold, per
- * collection, and how many there are.
+ * collection (and in the Meterless log), and how many there are.
  */
 function remoteOnly(remoteState, current) {
   const found = {};
@@ -55,6 +70,8 @@ function remoteOnly(remoteState, current) {
     found[name] = (remoteState[name] ?? []).filter(record => !known.has(record.id));
     count += found[name].length;
   }
+  found.meterlessLog = remoteOnlyLog(remoteState.meterlessLog, current.meterlessLog);
+  count += found.meterlessLog.length;
   return { found, count };
 }
 
@@ -133,10 +150,16 @@ function createPersistence({
    */
   function adoptRemoteRecords(remoteState) {
     if (!remoteState) return;
-    const { found, count } = remoteOnly(remoteState, snapshot());
+    const current = snapshot();
+    const { found, count } = remoteOnly(remoteState, current);
     if (count === 0) return;
 
-    if (typeof adopt === 'function') {
+    // Log entries are numbered per machine, so two logs that both hold entries
+    // cannot be merged: only an empty local log can take the Zetaris one over.
+    const logCannotMerge =
+      found.meterlessLog.length > 0 && (current.meterlessLog?.entries.length ?? 0) > 0;
+
+    if (typeof adopt === 'function' && !logCannotMerge) {
       adopt(found, remoteState);
       logger.warn(`Zetaris storage: adopted ${count} record(s) that Zetaris held and this server had not loaded.`);
       return;

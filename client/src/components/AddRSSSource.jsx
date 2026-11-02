@@ -75,6 +75,10 @@ function AddRSSSource() {
           <li>BBC News: <code>http://feeds.bbci.co.uk/news/rss.xml</code></li>
           <li>The Verge: <code>https://www.theverge.com/rss/index.xml</code></li>
           <li>Ars Technica: <code>https://feeds.arstechnica.com/arstechnica/index</code></li>
+          <li>NVIDIA Blog: <code>https://blogs.nvidia.com/feed/</code></li>
+          <li>NVIDIA Technical Blog: <code>https://developer.nvidia.com/blog/feed/</code></li>
+          <li>Zetaris Blog: <code>https://www.zetaris.com/blog/rss.xml</code></li>
+          <li>Cursor Changelog: <code>https://cursor.com/changelog/rss.xml</code></li>
         </ul>
       </div>
     </div>

@@ -44,6 +44,9 @@ const NASTY = [
   ''
 ];
 
+// A feed name with an apostrophe, double quotes and a backslash: the "news from this feed" query must cope.
+const ODD_FEED = 'O\'Reilly "Radar" \\ feed';
+
 function buildState(commentCount) {
   const user = {
     id: 'u-1',
@@ -66,22 +69,43 @@ function buildState(commentCount) {
         lastFetchedAt: '2026-01-02T00:00:00.000Z',
         lastError: null,
         lastItemCount: 3
+      },
+      {
+        id: 's-2',
+        name: ODD_FEED,
+        url: 'https://example.com/odd.xml',
+        createdAt: '2026-01-01T00:00:00.000Z',
+        lastFetchedAt: null,
+        lastError: null,
+        lastItemCount: 1
       }
     ],
     users: [
       user,
       { id: 'u-2', name: 'Local User', modelName: 'human', personality: 'Human participant', isAI: false }
     ],
-    news: NASTY.map((text, index) => ({
-      id: `n-${index}`,
-      sourceId: 's-1',
-      sourceName: 'Feed, one',
-      title: `Title ${index}: ${text}`,
-      content: text.repeat(3),
-      link: `https://example.com/${index}`,
-      pubDate: 'Mon, 02 Jan 2026 00:00:00 GMT',
-      fetchedAt: '2026-01-02T00:00:00.000Z'
-    })),
+    news: [
+      ...NASTY.map((text, index) => ({
+        id: `n-${index}`,
+        sourceId: 's-1',
+        sourceName: 'Feed, one',
+        title: `Title ${index}: ${text}`,
+        content: text.repeat(3),
+        link: `https://example.com/${index}`,
+        pubDate: 'Mon, 02 Jan 2026 00:00:00 GMT',
+        fetchedAt: '2026-01-02T00:00:00.000Z'
+      })),
+      {
+        id: 'n-odd',
+        sourceId: 's-2',
+        sourceName: ODD_FEED,
+        title: 'An article from the oddly named feed',
+        content: 'x',
+        link: 'https://example.com/odd',
+        pubDate: 'Mon, 02 Jan 2026 00:00:00 GMT',
+        fetchedAt: '2026-01-02T00:00:00.000Z'
+      }
+    ],
     comments: Array.from({ length: commentCount }, (_, index) => ({
       id: `c-${String(index).padStart(4, '0')}`,
       newsId: `n-${index % NASTY.length}`,
@@ -184,6 +208,28 @@ async function cleanup() {
   console.log(JSON.stringify(joined.headers), JSON.stringify(joined.rows));
   assert.ok(joined.rows.length > 0);
   ok('JOIN comments x news');
+
+  step('6. the example queries on the AI Provider page');
+  const { groups, feedQuery } = JSON.parse(
+    require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'client', 'src', 'zetarisExamples.json'), 'utf8')
+  );
+  const examples = groups.flatMap(group => group.queries);
+  for (const example of examples) {
+    const result = await zetaris.runSql(example.sql.replaceAll('{db}', database), { limit: 25 });
+    assert.ok(result.rows.length > 0, `${example.id} returned no rows`);
+  }
+  ok(`all ${examples.length} example queries run and return rows`);
+
+  // "News from this feed": one query per feed, the feed name as an escaped SQL string
+  // (the same escaping as the page: backslash and single quote).
+  const literal = value => `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+  for (const source of state.rssSources) {
+    const sql = feedQuery.sql.replaceAll('{db}', database).replace('{name}', () => literal(source.name));
+    const result = await zetaris.runSql(sql, { limit: 25 });
+    const expected = state.news.filter(item => item.sourceName === source.name).length;
+    assert.equal(result.rows.length, Math.min(expected, 20), `news from "${source.name}"`);
+  }
+  ok(`news from each of the ${state.rssSources.length} feeds, including one named with quotes and a backslash`);
 })()
   .catch(error => {
     failed = true;

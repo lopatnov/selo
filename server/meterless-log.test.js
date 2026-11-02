@@ -202,3 +202,9 @@ test('restore applies the limit and tolerates junk', () => {
   log.restore(undefined);
   assert.equal(log.size, 0);
 });
+
+test('snapshot carries the limit, so a copy knows when the log has dropped entries by itself', () => {
+  const log = createMeterlessLog({ limit: 3 });
+  log.push({ newsId: 'n1', ask: 'a' });
+  assert.equal(log.snapshot().limit, 3);
+});

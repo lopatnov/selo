@@ -272,6 +272,15 @@ async function installProviderMocks(page, options = {}) {
   });
 
   await page.route('**/api/zetaris', route => route.fulfill({ json: zetarisPayload() }));
+  // The feeds the app polls: the example dropdown offers "news from this feed" for each.
+  await page.route('**/api/rss-sources', route =>
+    route.fulfill({
+      json: [
+        { id: 'feed-1', name: 'The Verge', url: 'https://www.theverge.com/rss/index.xml' },
+        { id: 'feed-2', name: "O'Reilly Radar", url: 'https://example.com/radar.xml' }
+      ]
+    })
+  );
 
   return state;
 }
@@ -308,18 +317,103 @@ test('explains the Connect link and stores it without echoing the secret', async
   ).toBe(true);
 });
 
-test('shows where the app data is saved and offers SQL over it', async ({ page }) => {
+test('shows where the app data is saved', async ({ page }) => {
   await installProviderMocks(page, { config: offlineConfig(), models: offlineModels() });
 
   await page.goto('/providers');
 
   await expect(page.getByTestId('zetaris-storage')).toHaveText('Zetaris · database selo · synced');
   await expect(page.getByTestId('zetaris-storage-alert')).toHaveCount(0);
+});
 
-  await page.getByRole('button', { name: 'Comments per participant' }).click();
-  await expect(page.locator('#zetaris-sql')).toHaveValue(
-    /FROM selo\.comments GROUP BY user_name/
+test('the example dropdown runs a ready-made query on the app data and shows the rows', async ({
+  page
+}) => {
+  await installProviderMocks(page, { config: offlineConfig(), models: offlineModels() });
+  const asked = [];
+  await page.route('**/api/zetaris/query', async route => {
+    asked.push(JSON.parse(route.request().postData() || '{}').sql);
+    await route.fulfill({
+      json: {
+        headers: ['user_name', 'comments'],
+        rows: [
+          ['Jessica', '64'],
+          ['Kate\nwith a line break', '58']
+        ],
+        total: 2,
+        timeUsedMs: 12
+      }
+    });
+  });
+
+  await page.goto('/providers');
+
+  const picker = page.getByLabel('Example queries');
+  const groups = await picker.locator('optgroup').evaluateAll(nodes => nodes.map(node => node.label));
+  expect(groups).toEqual([
+    'Overview',
+    'Discussion',
+    'News and feeds',
+    'News from one feed',
+    'AI agents and Meterless'
+  ]);
+
+  await picker.selectOption({ label: 'Who talks the most' });
+
+  await expect(page.locator('#zetaris-sql')).toHaveValue(/FROM selo\.comments GROUP BY user_name/);
+  await expect(page.locator('.provider-output').last()).toContainText('Jessica | 64');
+  // A cell with a line break stays on one line.
+  await expect(page.locator('.provider-output').last()).toContainText('Kate with a line break | 58');
+  expect(asked).toHaveLength(1);
+  expect(asked[0]).toMatch(/^SELECT user_name, count\(\*\) AS comments FROM selo\.comments/);
+  // The dropdown goes back to its prompt, ready for the next example.
+  await expect(picker).toHaveValue('');
+});
+
+test('news can be asked for from all feeds or from one feed, with the name escaped', async ({
+  page
+}) => {
+  await installProviderMocks(page, { config: offlineConfig(), models: offlineModels() });
+  const asked = [];
+  await page.route('**/api/zetaris/query', async route => {
+    asked.push(JSON.parse(route.request().postData() || '{}').sql);
+    await route.fulfill({ json: { headers: ['title'], rows: [['x']], total: 1, timeUsedMs: 1 } });
+  });
+
+  await page.goto('/providers');
+  const picker = page.getByLabel('Example queries');
+
+  await picker.selectOption({ label: 'News from all feeds, newest first' });
+  await expect.poll(() => asked.length).toBe(1);
+  expect(asked[0]).toBe(
+    'SELECT fetched_at, source_name, title, link FROM selo.news ORDER BY fetched_at DESC LIMIT 20'
   );
+
+  await picker.selectOption({ label: 'News from "The Verge", newest first' });
+  await expect.poll(() => asked.length).toBe(2);
+  expect(asked[1]).toBe(
+    "SELECT fetched_at, title, link FROM selo.news WHERE source_name = 'The Verge' ORDER BY fetched_at DESC LIMIT 20"
+  );
+
+  await picker.selectOption({ label: `News from "O'Reilly Radar", newest first` });
+  await expect.poll(() => asked.length).toBe(3);
+  expect(asked[2]).toContain(String.raw`WHERE source_name = 'O\'Reilly Radar'`);
+});
+
+test('there is no example dropdown when the data is not in Zetaris', async ({ page }) => {
+  await installProviderMocks(page, { config: offlineConfig(), models: offlineModels() });
+  await page.route('**/api/zetaris', route =>
+    route.fulfill({
+      json: zetarisPayload({
+        storage: { backend: 'local', health: 'local', lastSavedAt: null, lastError: null }
+      })
+    })
+  );
+
+  await page.goto('/providers');
+
+  await expect(page.getByTestId('zetaris-storage')).toHaveText('Local file only (Zetaris storage is off)');
+  await expect(page.getByLabel('Example queries')).toHaveCount(0);
 });
 
 test('says so when Zetaris is not accepting the app data, and that nothing is lost', async ({

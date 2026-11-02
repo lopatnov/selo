@@ -1152,16 +1152,3 @@ body {
   background: #fdf6e8;
   color: #b7791f;
 }
-.btn-link {
-  background: none;
-  border: 0;
-  padding: 0;
-  color: #2980b9;
-  font: inherit;
-  text-decoration: underline;
-  cursor: pointer;
-}
-
-.btn-link:hover {
-  color: #1f618d;
-}

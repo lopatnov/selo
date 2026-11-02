@@ -447,19 +447,35 @@ How it behaves:
   start (Zetaris was down at the last save), the file wins and is sent to Zetaris.
   If Zetaris comes back while the app is running, it is read once before the first
   save: records it holds that this server never loaded are added to the app, not
-  overwritten. The local file is written only when something changed, so a clean
-  restart always loads from Zetaris.
+  overwritten (the Meterless log too, when this server's own log is empty; if both
+  logs hold different entries, saving pauses and the page says to restart). The
+  local file is written only when something changed, so a clean restart always
+  loads from Zetaris.
 - **RSS** - the feeds are fetched by the app (a Zetaris REST table reads only JSON
   or CSV, not RSS/XML); the fetched news is saved to and loaded from Zetaris.
 - **Local only** - set `SELO_STORAGE=local` to skip Zetaris storage entirely.
 
-Look at it with SQL on the AI Provider page (**Run query** has ready-made
-examples) or in the Zetaris SQL editor:
+Look at it with SQL on the AI Provider page or in the Zetaris SQL editor. The
+**Example queries** dropdown on the page runs a ready-made query on the live data
+when you pick it: rows per table, the latest comments with their text, who talks
+the most, AI against human, the most discussed articles, comments per hour, failed
+answers, news from all feeds or from one feed (one entry per feed the app polls),
+feed health, the AI personalities, and Meterless calls per model, the slowest
+calls and the prompts the agents were asked. The comment text, the prompts and the
+other fields that have no column of their own are read out of `doc` with
+`get_json_object(doc, '$.text')`. The examples live in
+[`client/src/zetarisExamples.json`](client/src/zetarisExamples.json), and
+`npm run verify:storage` runs every one of them on a throw-away database.
 
 ```sql
-SELECT user_name, count(*) AS comments FROM selo.comments GROUP BY user_name ORDER BY comments DESC
-SELECT n.title, count(*) AS comments FROM selo.comments c JOIN selo.news n ON c.news_id = n.id GROUP BY n.title ORDER BY comments DESC LIMIT 10
+SELECT c.created_at, c.user_name, n.title, substr(get_json_object(c.doc, '$.text'), 1, 160) AS text FROM selo.comments c JOIN selo.news n ON c.news_id = n.id ORDER BY c.created_at DESC LIMIT 10
+SELECT fetched_at, title, link FROM selo.news WHERE source_name = 'The Verge' ORDER BY fetched_at DESC LIMIT 20
 ```
+
+The page only reads. This Zetaris build (2.4.3.1) answers `INSERT`, `UPDATE` and
+`DELETE` on file tables with an error (checked, also for a table over a folder),
+so data gets into Zetaris through the app: a comment, a feed or an AI personality
+added in the UI or by the API is saved to the tables within a couple of seconds.
 
 Check the whole chain against your Zetaris with `npm run verify:storage`: it uses
 a throw-away database, saves awkward text (quotes, newlines, Cyrillic, emoji),
@@ -629,6 +645,7 @@ Consequences:
 | **Models / routing modes → Refresh** | Calls `GET /v1/models` and shows every id returned, split into routing modes (`meterless/*`) and other runtime ids, with the answer source, runtime status `HTTP`, total count and check time. If the runtime is unavailable it labels the built-in six-mode list as a fallback. | No                    |
 | **Send test request**                | Sends one plain-text chat request to the selected model and requires a string response. A cold model load may take up to 180 s.                                                                                                                                                  | No                    |
 | **Zetaris → Re-check status**        | Runs the Zetaris `SELECT 1` probe. The Zetaris key and organisation id are read from `.env`, not from this page.                                                                                                                                                                 | No                    |
+| **Zetaris → Example queries**        | Dropdown of ready-made queries over the app's own tables (including news from all feeds or from one feed). Picking one fills the SQL box and runs it. Shown only when the app data is in Zetaris.                                                                                | No                    |
 | **Zetaris → Run query**              | Runs one read-only `SELECT`, `SHOW`, `DESCRIBE` or `WITH` statement through the Zetaris REST SQL API.                                                                                                                                                                            | No                    |
 
 ### What is stored where

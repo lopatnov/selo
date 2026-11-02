@@ -153,7 +153,7 @@ function createMeterlessLog({ limit = 200, file = null, onChange = null } = {}) 
 
   /** The whole log, as saved: what the owner copies to Zetaris. */
   function snapshot() {
-    return { sequence, entries: entries.slice() };
+    return { sequence, limit, entries: entries.slice() };
   }
 
   /**

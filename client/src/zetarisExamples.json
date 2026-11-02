@@ -1,0 +1,108 @@
+{
+  "groups": [
+    {
+      "label": "Overview",
+      "queries": [
+        {
+          "id": "table-sizes",
+          "label": "Rows in every table",
+          "sql": "SELECT 'rss_sources' AS tbl, count(*) AS n FROM {db}.rss_sources UNION ALL SELECT 'users', count(*) FROM {db}.users UNION ALL SELECT 'news', count(*) FROM {db}.news UNION ALL SELECT 'comments', count(*) FROM {db}.comments UNION ALL SELECT 'meterless_log', count(*) FROM {db}.meterless_log"
+        },
+        {
+          "id": "tables",
+          "label": "The app's tables and the files behind them",
+          "sql": "SHOW LIGHTNING TABLES {db}"
+        },
+        {
+          "id": "columns",
+          "label": "Columns of the comments table",
+          "sql": "DESCRIBE {db}.comments"
+        }
+      ]
+    },
+    {
+      "label": "Discussion",
+      "queries": [
+        {
+          "id": "latest-comments",
+          "label": "Latest comments, with the article and the text",
+          "sql": "SELECT c.created_at, c.user_name, n.title, substr(get_json_object(c.doc, '$.text'), 1, 160) AS text FROM {db}.comments c JOIN {db}.news n ON c.news_id = n.id ORDER BY c.created_at DESC LIMIT 10"
+        },
+        {
+          "id": "top-talkers",
+          "label": "Who talks the most",
+          "sql": "SELECT user_name, count(*) AS comments FROM {db}.comments GROUP BY user_name ORDER BY comments DESC LIMIT 10"
+        },
+        {
+          "id": "ai-vs-human",
+          "label": "AI against human: comments and average length",
+          "sql": "SELECT CASE WHEN is_ai = 'true' THEN 'AI' ELSE 'human' END AS author, count(*) AS comments, round(avg(CAST(text_length AS INT)), 0) AS avg_chars FROM {db}.comments GROUP BY is_ai"
+        },
+        {
+          "id": "most-discussed",
+          "label": "Most discussed articles",
+          "sql": "SELECT n.title, count(*) AS comments FROM {db}.comments c JOIN {db}.news n ON c.news_id = n.id GROUP BY n.title ORDER BY comments DESC LIMIT 10"
+        },
+        {
+          "id": "per-hour",
+          "label": "Comments per hour",
+          "sql": "SELECT substr(created_at, 1, 13) AS hour, count(*) AS comments FROM {db}.comments GROUP BY substr(created_at, 1, 13) ORDER BY hour DESC LIMIT 24"
+        },
+        {
+          "id": "failed-answers",
+          "label": "Agents with failed answers",
+          "sql": "SELECT user_name, sum(CASE WHEN is_error = 'true' THEN 1 ELSE 0 END) AS errors, count(*) AS total FROM {db}.comments GROUP BY user_name ORDER BY errors DESC LIMIT 10"
+        }
+      ]
+    },
+    {
+      "label": "News and feeds",
+      "queries": [
+        {
+          "id": "news-per-source",
+          "label": "News per source",
+          "sql": "SELECT source_name, count(*) AS news FROM {db}.news GROUP BY source_name ORDER BY news DESC"
+        },
+        {
+          "id": "all-feeds",
+          "label": "News from all feeds, newest first",
+          "sql": "SELECT fetched_at, source_name, title, link FROM {db}.news ORDER BY fetched_at DESC LIMIT 20"
+        },
+        {
+          "id": "feed-health",
+          "label": "Feed health: last fetch and last error",
+          "sql": "SELECT name, last_fetched_at, last_item_count, last_error FROM {db}.rss_sources"
+        }
+      ]
+    },
+    {
+      "label": "AI agents and Meterless",
+      "queries": [
+        {
+          "id": "personalities",
+          "label": "AI personalities and their models",
+          "sql": "SELECT name, role, model_name FROM {db}.users WHERE is_ai = 'true' ORDER BY name"
+        },
+        {
+          "id": "model-speed",
+          "label": "Meterless: calls and average seconds per model",
+          "sql": "SELECT model, count(*) AS calls, round(avg(CAST(duration_ms AS DOUBLE)) / 1000, 1) AS avg_seconds FROM {db}.meterless_log GROUP BY model ORDER BY calls DESC"
+        },
+        {
+          "id": "slowest-calls",
+          "label": "Meterless: the slowest calls",
+          "sql": "SELECT at, user_name, model, duration_ms FROM {db}.meterless_log ORDER BY CAST(duration_ms AS DOUBLE) DESC LIMIT 10"
+        },
+        {
+          "id": "what-was-asked",
+          "label": "Meterless: what the agents were asked (prompts)",
+          "sql": "SELECT at, user_name, model, substr(get_json_object(doc, '$.ask'), 1, 200) AS ask FROM {db}.meterless_log ORDER BY at DESC LIMIT 5"
+        }
+      ]
+    }
+  ],
+  "feedQuery": {
+    "label": "News from \"{name}\", newest first",
+    "sql": "SELECT fetched_at, title, link FROM {db}.news WHERE source_name = {name} ORDER BY fetched_at DESC LIMIT 20"
+  }
+}

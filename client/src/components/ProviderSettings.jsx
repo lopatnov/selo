@@ -2,6 +2,7 @@ import axios from 'axios';
 import { useCallback, useEffect, useState } from 'react';
 
 import API_BASE from '../api';
+import zetarisExamples from '../zetarisExamples.json';
 
 const STATUS_LABELS = {
   online: 'Online',
@@ -58,6 +59,38 @@ function StatusBadge({ status, testId }) {
   );
 }
 
+/** A value as a Spark SQL string literal: backslash and single quote are escaped. */
+function sqlString(value) {
+  return `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+}
+
+/** The example groups for database `db`, plus a group with one query per feed. */
+function buildExampleGroups(db, feeds) {
+  const groups = zetarisExamples.groups.map(group => ({
+    ...group,
+    queries: group.queries.map(query => ({ ...query, sql: query.sql.replaceAll('{db}', db) }))
+  }));
+
+  const named = feeds.filter(feed => typeof feed?.name === 'string' && feed.name.trim());
+  if (named.length > 0) {
+    const { label, sql } = zetarisExamples.feedQuery;
+    groups.splice(groups.findIndex(group => group.label === 'News and feeds') + 1, 0, {
+      label: 'News from one feed',
+      queries: named.map(feed => ({
+        id: `feed-${feed.id ?? feed.name}`,
+        label: label.replace('{name}', () => feed.name),
+        sql: sql.replaceAll('{db}', db).replace('{name}', () => sqlString(feed.name))
+      }))
+    });
+  }
+  return groups;
+}
+
+/** One result row on one line: a cell with line breaks (a prompt, a comment) is collapsed. */
+function formatRow(row) {
+  return row.map(cell => String(cell ?? '').replaceAll(/\s+/g, ' ').trim()).join(' | ');
+}
+
 /** One line about where the app data is saved, for the Zetaris card. */
 function describeStorage(storage) {
   if (storage == null) return '…';
@@ -106,6 +139,7 @@ function ProviderSettings() {
   const [zetaris, setZetaris] = useState(null);
   const [zetarisBusy, setZetarisBusy] = useState('');
   const [zetarisSql, setZetarisSql] = useState('SELECT 1 AS one');
+  const [feeds, setFeeds] = useState([]);
   const [zetarisResult, setZetarisResult] = useState(null);
   const [zetarisError, setZetarisError] = useState('');
 
@@ -191,9 +225,20 @@ function ProviderSettings() {
     }
   }, [applyConfig, fetchModels, fetchClasses]);
 
+  // The feeds the app polls, so the examples can offer "news from this feed".
+  const loadFeeds = useCallback(async () => {
+    try {
+      const { data } = await axios.get(`${API_BASE}/rss-sources`);
+      setFeeds(Array.isArray(data) ? data : []);
+    } catch {
+      setFeeds([]);
+    }
+  }, []);
+
   const loadZetaris = useCallback(async () => {
     setZetarisBusy('status');
     setZetarisError('');
+    loadFeeds();
     try {
       const { data } = await axios.get(`${API_BASE}/zetaris`);
       setZetaris(data);
@@ -202,7 +247,7 @@ function ProviderSettings() {
     } finally {
       setZetarisBusy('');
     }
-  }, []);
+  }, [loadFeeds]);
 
   useEffect(() => {
     load();
@@ -307,22 +352,31 @@ function ProviderSettings() {
     }
   };
 
-  const handleZetarisQuery = async event => {
-    event.preventDefault();
+  const runZetarisQuery = async sql => {
     setZetarisBusy('query');
     setZetarisError('');
     setZetarisResult(null);
     try {
-      const { data } = await axios.post(`${API_BASE}/zetaris/query`, {
-        sql: zetarisSql,
-        limit: 25
-      });
+      const { data } = await axios.post(`${API_BASE}/zetaris/query`, { sql, limit: 25 });
       setZetarisResult(data);
     } catch (err) {
       setZetarisError(readError(err));
     } finally {
       setZetarisBusy('');
     }
+  };
+
+  const handleZetarisQuery = event => {
+    event.preventDefault();
+    return runZetarisQuery(zetarisSql);
+  };
+
+  // Picking an example fills the box and runs it, so the answer is on screen at once.
+  const handleZetarisExample = event => {
+    const sql = event.target.value;
+    if (!sql) return;
+    setZetarisSql(sql);
+    runZetarisQuery(sql);
   };
 
   const statusKind = status?.status || 'checking';
@@ -343,26 +397,10 @@ function ProviderSettings() {
   const storage = zetaris?.storage;
   const storageDb = storage?.database || 'selo';
   const storageSummary = describeStorage(storage);
-  const exampleQueries =
-    storage?.backend === 'zetaris'
-      ? [
-          {
-            label: 'Comments per participant',
-            sql: `SELECT user_name, count(*) AS comments FROM ${storageDb}.comments GROUP BY user_name ORDER BY comments DESC`
-          },
-          {
-            label: 'Most discussed news',
-            sql:
-              `SELECT n.title, count(*) AS comments FROM ${storageDb}.comments c ` +
-              `JOIN ${storageDb}.news n ON c.news_id = n.id GROUP BY n.title ORDER BY comments DESC LIMIT 10`
-          },
-          {
-            label: 'News per source',
-            sql: `SELECT source_name, count(*) AS news FROM ${storageDb}.news GROUP BY source_name ORDER BY news DESC`
-          },
-          { label: 'Tables', sql: `SHOW LIGHTNING TABLES ${storageDb}` }
-        ]
-      : [];
+  // Ready-made queries over the app's own tables (src/zetarisExamples.json), and
+  // one "news from this feed" query for every feed the app polls.
+  const exampleGroups =
+    storage?.backend === 'zetaris' ? buildExampleGroups(storageDb, feeds) : [];
 
   return (
     <div>
@@ -805,6 +843,32 @@ function ProviderSettings() {
         </dl>
 
         <form onSubmit={handleZetarisQuery} style={{ marginTop: '1rem' }}>
+          {exampleGroups.length > 0 && (
+            <div className="form-group">
+              <label htmlFor="zetaris-example">Example queries</label>
+              <select
+                id="zetaris-example"
+                value=""
+                onChange={handleZetarisExample}
+                disabled={zetarisBusy === 'query'}
+              >
+                <option value="">Pick one to run it on the app&apos;s own data…</option>
+                {exampleGroups.map(group => (
+                  <optgroup key={group.label} label={group.label}>
+                    {group.queries.map(query => (
+                      <option key={query.id} value={query.sql}>
+                        {query.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+              <small className="provider-hint">
+                The app&apos;s data is in the <code>{storageDb}</code> database. New comments from the
+                AI agents show up in these tables within a couple of seconds.
+              </small>
+            </div>
+          )}
           <div className="form-group">
             <label htmlFor="zetaris-sql">Read-only SQL</label>
             <textarea
@@ -817,24 +881,8 @@ function ProviderSettings() {
             />
             <small className="provider-hint">
               Only a single <code>SELECT</code>, <code>SHOW</code>, <code>DESCRIBE</code> or{' '}
-              <code>WITH</code> statement is accepted here.
-              {exampleQueries.length > 0 && (
-                <>
-                  {' '}The app&apos;s own data is in the <code>{storageDb}</code> database. Try:{' '}
-                  {exampleQueries.map((example, index) => (
-                    <span key={example.label}>
-                      {index > 0 ? ' · ' : ''}
-                      <button
-                        type="button"
-                        className="btn-link"
-                        onClick={() => setZetarisSql(example.sql)}
-                      >
-                        {example.label}
-                      </button>
-                    </span>
-                  ))}
-                </>
-              )}
+              <code>WITH</code> statement is accepted here. Zetaris cannot <code>INSERT</code> into
+              file tables, so the app saves its data itself; this box only reads it.
             </small>
           </div>
           <div className="provider-actions">
@@ -856,7 +904,7 @@ function ProviderSettings() {
               {zetarisResult.timeUsedMs ? ` · ${zetarisResult.timeUsedMs} ms` : ''}
             </div>
             <pre className="provider-output">
-              {[zetarisResult.headers?.join(' | '), ...(zetarisResult.rows || []).map(row => row.join(' | '))]
+              {[zetarisResult.headers?.join(' | '), ...(zetarisResult.rows || []).map(formatRow)]
                 .filter(Boolean)
                 .join('\n')}
             </pre>

@@ -115,7 +115,12 @@ const persistence = createPersistence({
   }),
   // Zetaris answered after a failed start-up and holds records we never loaded:
   // keep them instead of overwriting them with the first save.
-  adopt: (found, remoteState) => adoptRecords(storage, found, remoteState)
+  adopt: (found, remoteState) => {
+    adoptRecords(storage, found, remoteState);
+    // persistence only gets here with an empty local log: take Zetaris's over,
+    // sequence included, so new entries continue its numbering.
+    if (found.meterlessLog.length > 0) meterlessLog.restore(remoteState.meterlessLog);
+  }
 });
 
 async function hydrateStorage() {

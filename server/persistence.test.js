@@ -383,3 +383,77 @@ test('nothing is written before the state has been loaded', async () => {
   persistence.schedule();
   assert.equal(local.writes, 1, 'writing starts once hydrate has finished');
 });
+
+function logEntry(id, at = `2026-05-01T00:00:0${id}.000Z`) {
+  return { id, at, newsId: null, userName: '', model: '', durationMs: null, ask: '', think: '', answer: '', error: null };
+}
+
+function withLog(live, entries, limit = 200) {
+  return () => ({
+    ...emptyState(),
+    users: live.users,
+    meterlessLog: { sequence: entries.reduce((max, entry) => Math.max(max, entry.id), 0), limit, entries }
+  });
+}
+
+test('after a failed start-up, an empty local Meterless log takes the Zetaris one over before the first save', async () => {
+  const remoteLog = { sequence: 7, entries: [logEntry(7), logEntry(6)] };
+  const stored = stateWith({ updatedAt: '2026-05-01T00:00:00.000Z' });
+  stored.meterlessLog = remoteLog;
+  const remote = fakeRemote({ stored, failSchema: 1 });
+  const live = { users: [] };
+  const adopted = [];
+  const { persistence } = build({
+    remote,
+    snapshot: withLog(live, []),
+    adopt: (found, remoteState) => adopted.push({ found, remoteState })
+  });
+
+  await persistence.hydrate();
+  await wait(120);
+
+  assert.equal(adopted.length, 1);
+  assert.deepEqual(adopted[0].found.meterlessLog.map(entry => entry.id), [7, 6]);
+  assert.equal(adopted[0].remoteState.meterlessLog.sequence, 7);
+  assert.ok(remote.saves.length >= 1);
+  assert.equal(persistence.status().health, 'synced');
+});
+
+test('two Meterless logs that both hold entries cannot be merged, so saving pauses instead of replacing Zetaris', async () => {
+  const stored = stateWith({ updatedAt: '2026-05-01T00:00:00.000Z' });
+  stored.meterlessLog = { sequence: 9, entries: [logEntry(9), logEntry(8)] };
+  const remote = fakeRemote({ stored, failSchema: 1 });
+  const live = { users: [] };
+  const { persistence } = build({
+    remote,
+    snapshot: withLog(live, [logEntry(1, '2026-06-01T00:00:00.000Z')]),
+    adopt: () => assert.fail('a log with entries must not be overwritten')
+  });
+
+  await persistence.hydrate();
+  persistence.schedule();
+  await wait(120);
+
+  assert.equal(remote.saves.length, 0);
+  assert.equal(persistence.status().health, 'degraded');
+  assert.match(persistence.status().lastError, /saving is paused/);
+});
+
+test('log entries both sides hold, or that a full local log dropped on its own, are not missing', async () => {
+  const stored = stateWith({ updatedAt: '2026-05-01T00:00:00.000Z' });
+  // Zetaris still has the old entries 1-2; the local log (cap 3) moved on to 3-5.
+  stored.meterlessLog = { sequence: 5, entries: [logEntry(2), logEntry(1), logEntry(3)] };
+  const remote = fakeRemote({ stored, failSchema: 1 });
+  const live = { users: [] };
+  const { persistence } = build({
+    remote,
+    snapshot: withLog(live, [logEntry(5), logEntry(4), logEntry(3)], 3),
+    adopt: () => assert.fail('nothing is missing')
+  });
+
+  await persistence.hydrate();
+  await wait(120);
+
+  assert.ok(remote.saves.length >= 1);
+  assert.equal(persistence.status().health, 'synced');
+});
