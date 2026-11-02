@@ -461,6 +461,36 @@ test('chatDetailed keeps reasoning_content out of the answer and chat stays a st
   assert.equal(plain, 'A buyout offer would just be a distraction.');
 });
 
+test('chatDetailed reports the token count and flags a reply that reached the cap', async () => {
+  const bodies = [];
+  const usages = [{ completion_tokens: 700 }, { completion_tokens: 312 }, undefined];
+  const { runtime } = makeRuntime({
+    token: 'rt-good',
+    fetchImpl: async (url, init) => {
+      bodies.push(JSON.parse(init.body));
+      return jsonResponse(200, {
+        // The runtime says "stop" even when the cap cut the reply.
+        choices: [{ finish_reason: 'stop', message: { content: 'The 30-day clock starts Monday, and if' } }],
+        usage: usages.shift()
+      });
+    }
+  });
+  const messages = [{ role: 'user', content: 'React' }];
+
+  const capped = await runtime.chatDetailed({ model: 'meterless/auto', messages, max_tokens: 700 });
+  assert.equal(capped.completionTokens, 700);
+  assert.equal(capped.truncated, true);
+  assert.equal(bodies[0].max_tokens, 700);
+
+  const finished = await runtime.chatDetailed({ model: 'meterless/auto', messages, max_tokens: 700 });
+  assert.equal(finished.completionTokens, 312);
+  assert.equal(finished.truncated, false);
+
+  const unknown = await runtime.chatDetailed({ model: 'meterless/auto', messages, max_tokens: 700 });
+  assert.equal(unknown.completionTokens, null);
+  assert.equal(unknown.truncated, false);
+});
+
 test('connect persists the base URL and token so a fresh process still sees them', () => {
   const dir = tempDir();
   const store = new SettingsStore(path.join(dir, 'settings.json'));
@@ -691,4 +721,43 @@ test('a job request can be given a shorter timeout, and a hung runtime is then r
     error => error instanceof ProviderError && error.code === 'offline' && /Timed out/.test(error.message)
   );
   assert.ok(Date.now() - startedAt < 2_000, 'it gave up at its own timeout, not the 30 s default');
+});
+
+test('the hosted Meterless endpoint reports the token count and a cap hit too', async () => {
+  const { meterlessCloud } = require('./index');
+  const savedKey = process.env.METERLESS_API_KEY;
+  const savedFetch = globalThis.fetch;
+  const replies = [
+    { finish_reason: 'stop', usage: { completion_tokens: 700 } },
+    { finish_reason: 'length', usage: undefined },
+    { finish_reason: 'stop', usage: { completion_tokens: 90 } }
+  ];
+  process.env.METERLESS_API_KEY = 'test-key';
+  globalThis.fetch = async () => {
+    const { finish_reason, usage } = replies.shift();
+    return jsonResponse(200, {
+      choices: [{ finish_reason, message: { content: 'The 30-day clock starts Monday, and if' } }],
+      usage
+    });
+  };
+
+  try {
+    const request = { model: 'gpt-4', messages: [{ role: 'user', content: 'React' }], max_tokens: 700 };
+
+    const atCap = await meterlessCloud.chatDetailed(request);
+    assert.equal(atCap.completionTokens, 700);
+    assert.equal(atCap.truncated, true);
+
+    const byFinishReason = await meterlessCloud.chatDetailed(request);
+    assert.equal(byFinishReason.completionTokens, null);
+    assert.equal(byFinishReason.truncated, true);
+
+    const finished = await meterlessCloud.chatDetailed(request);
+    assert.equal(finished.completionTokens, 90);
+    assert.equal(finished.truncated, false);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedKey === undefined) delete process.env.METERLESS_API_KEY;
+    else process.env.METERLESS_API_KEY = savedKey;
+  }
 });

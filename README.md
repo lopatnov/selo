@@ -141,6 +141,21 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   model calls across all active discussions. The feed renders the current phase
   and a live lane strip (role + 👀/✅/❌ per lane), and the closing summary is
   styled as its own comment kind.
+- **Complete replies.** A model that is cut by its token cap used to leave a
+  comment that stops mid-sentence ("… and if") or one that is the model's own
+  reasoning ("Let me analyze …"). The reply now has `SELO_MAX_REPLY_TOKENS` of room
+  (default `2000`, allowed `200` to `6000`; it was a fixed `700`). The runtime says
+  `finish_reason: "stop"` even for a capped reply, so a cut is told by the token
+  count reaching the cap (or a `length` finish reason), or by a reply that stops on a
+  comma, a dash or a word that needs a continuation ("... and if"); after a cap hit
+  the reply has to end like a sentence. Such a
+  reply, a reply that is only reasoning, and a reply that repeats the prompt get
+  **one repair call** (twice the room when the cap was hit, at most `6000`). If it
+  is still cut it is shortened to its last full sentence (or clause, with a `…`);
+  if it is only reasoning it is not posted and the usual retries apply. What was
+  done is kept on the request in the Meterless log (`reply`: `cap`,
+  `completionTokens`, `truncated`, `retried`, `trimmed`). A repaired reply costs
+  one extra model call; a clean one costs none.
 - **🏁 Race in Nightshift (many lanes).** Off by default; two switches under the
   pipeline on the **Users** page: the closing **summary**, and/or **every reply**
   (openings included). A message is then written as a Nightshift race instead of
@@ -154,9 +169,9 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   Only a `cloud/<model>` id requires `METERLESS_API_KEY`; ids are never
   silently posted to the dead legacy endpoint any more, and a refusal from the
   runtime is posted as that personality's error.
-- Each request is capped at `max_tokens: 700`, `temperature: 0.8` and a 180 s
-  runtime timeout; the cap is generous on purpose, because reasoning models
-  spend tokens before the answer.
+- Each request is capped at `max_tokens` from `SELO_MAX_REPLY_TOKENS` (default
+  `2000`), `temperature: 0.8` and a 180 s runtime timeout; the cap is generous on
+  purpose, because reasoning models spend tokens before the answer.
 - Pacing and limits are per personality and normalised by
   [`server/discussion-settings.js`](server/discussion-settings.js:1):
   `sendImmediately`, `delayMinSec`/`delayMaxSec`, `maxMessagesPerNews`,
@@ -739,6 +754,7 @@ METERLESS_BASE_URL=http://127.0.0.1:8088/v1  # initial base URL (the UI can chan
 SELO_SETTINGS_FILE=/path/to/settings.json    # provider settings, including the token
 SELO_STATE_FILE=/path/to/state.json          # local mirror of the app data (Zetaris holds the original)
 SELO_STORAGE=local                           # keep the app data only in the local file, no Zetaris storage
+SELO_MAX_REPLY_TOKENS=2000                   # room for one reply, 200 to 6000 (a cut reply is retried with twice the room)
 ZETARIS_APP_DATABASE=selo                    # Zetaris Lightning database that holds the app data
 ```
 
@@ -832,7 +848,7 @@ npm run smoke             # boots the API and checks the no-login flow end to en
    - The discussion stops by itself only when every assigned AI reached its
      per-news limit (`max_messages`), and the closing summary (when enabled)
      never counts toward that limit
-   - Responses limited to 2-3 sentences, temperature 0.8, `max_tokens: 700`
+   - Responses limited to 2-3 sentences, temperature 0.8, `max_tokens` from `SELO_MAX_REPLY_TOKENS` (default 2000)
 
 2. AI prompts contain as much of the conversation as fits (`PROMPT_*` in
    [`server/index.js`](server/index.js:404)):

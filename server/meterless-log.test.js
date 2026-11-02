@@ -46,6 +46,29 @@ test('entries carry ask / think / answer and the news id', () => {
   assert.equal(typeof entry.at, 'string');
 });
 
+test('an entry keeps what the reply guard did, and junk becomes a safe shape', () => {
+  const log = createMeterlessLog();
+
+  const guarded = log.push({
+    answer: 'a reply',
+    reply: { cap: 4000, completionTokens: 3100, truncated: true, retried: true, trimmed: false, extra: 'x' }
+  });
+  assert.deepEqual(guarded.reply, {
+    cap: 4000,
+    completionTokens: 3100,
+    truncated: true,
+    retried: true,
+    trimmed: false
+  });
+
+  assert.equal(log.push({ answer: 'no guard' }).reply, null);
+  assert.equal(log.push({ answer: 'junk', reply: 'cut' }).reply, null);
+
+  const restored = createMeterlessLog();
+  restored.restore(log.snapshot());
+  assert.equal(restored.list().find(entry => entry.id === guarded.id).reply.cap, 4000);
+});
+
 test('list filters by news id and honours a limit', () => {
   const log = createMeterlessLog();
   log.push({ newsId: 'n1', ask: '1' });
