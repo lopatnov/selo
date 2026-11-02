@@ -24,9 +24,12 @@ const { JOB_REQUEST_TIMEOUT_MS, ProviderError } = require('./meterless-runtime')
 // Longer than a chat call, shorter than a night: a summary waits for this.
 const RACE_TIMEOUT_MS = 150_000;
 const RACE_POLL_MS = 2_000;
-// After the race deadline there is still a cancel and a read of what landed;
-// together they get this much, and no request is allowed past it.
+// After the race deadline there is still a read of what landed; it gets this
+// much, and no request that waits for an answer is allowed past it.
 const RACE_GRACE_MS = 15_000;
+// A cancel is cleanup nobody waits for: it is sent without holding the caller up,
+// and gives up on its own after this long.
+const CANCEL_TIMEOUT_MS = 10_000;
 const FINAL_STATUSES = new Set(['completed', 'cancelled', 'errored', 'failed']);
 
 const sleepFor = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -74,13 +77,30 @@ async function firstUsable(runtime, jobId, seqs, { hardDeadline, now, budget }) 
     : firstUsable(runtime, jobId, rest, { hardDeadline, now, budget });
 }
 
-/** Poll until the job is in a final status; flagged `timedOut` when the deadline passes first. */
-async function waitForJob(runtime, jobId, { deadline, pollMs, sleep, now, budget }) {
+/**
+ * Poll until the job is in a final status; flagged `timedOut` when the deadline
+ * passes first. No request is sent once the hard deadline has passed, and a pause
+ * between polls never runs past the deadline.
+ */
+async function waitForJob(runtime, jobId, { deadline, hardDeadline, pollMs, sleep, now, budget }) {
+  if (now() >= hardDeadline) return { timedOut: true };
   const job = await runtime.getJob(jobId, budget());
   if (FINAL_STATUSES.has(String(job?.status))) return job;
   if (now() >= deadline) return { ...job, timedOut: true };
-  await sleep(pollMs);
-  return waitForJob(runtime, jobId, { deadline, pollMs, sleep, now, budget });
+  await sleep(Math.max(0, Math.min(pollMs, deadline - now())));
+  return waitForJob(runtime, jobId, { deadline, hardDeadline, pollMs, sleep, now, budget });
+}
+
+/**
+ * Stop a race nobody is waiting for. Fire and forget: the caller is not held up by
+ * it, it can neither throw nor mask the real error, and it times out by itself.
+ */
+function cancelInBackground(runtime, jobId) {
+  try {
+    Promise.resolve(runtime.cancelJob(jobId, { timeoutMs: CANCEL_TIMEOUT_MS })).catch(() => {});
+  } catch {
+    // A cancel that cannot even start is not worth failing the race over.
+  }
 }
 
 /**
@@ -115,23 +135,23 @@ async function runRace(
   const hardDeadline = deadline + graceMs;
   // Each request waits no longer than the time that is left.
   const budget = () => ({
-    timeoutMs: Math.max(1_000, Math.min(JOB_REQUEST_TIMEOUT_MS, hardDeadline - now()))
+    timeoutMs: Math.min(JOB_REQUEST_TIMEOUT_MS, Math.max(0, hardDeadline - now()))
   });
 
   const { id } = await runtime.submitRace({ messages, attempts, title });
 
   let job;
   try {
-    job = await waitForJob(runtime, id, { deadline, pollMs, sleep, now, budget });
+    job = await waitForJob(runtime, id, { deadline, hardDeadline, pollMs, sleep, now, budget });
   } catch (error) {
     // Nobody is waiting for this race any more: stop it spending cloud tokens.
-    await runtime.cancelJob(id, budget()).catch(() => {});
+    cancelInBackground(runtime, id);
     throw error;
   }
 
   const timedOut = job.timedOut === true;
   if (timedOut) {
-    await runtime.cancelJob(id, budget()).catch(() => {});
+    cancelInBackground(runtime, id);
   } else if (job.status !== 'completed') {
     throw new ProviderError('race_failed', `The race ended as "${job.status}", with no answer.`);
   }

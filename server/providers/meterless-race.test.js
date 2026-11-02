@@ -303,3 +303,114 @@ test('every request waits no longer than the time left, and never more than the 
   assert.equal(seen.at(-1).timeoutMs, 18_000);
   for (const call of seen) assert.ok(call.timeoutMs >= 1_000 && call.timeoutMs <= 30_000);
 });
+
+const ask = [{ role: 'user', content: 'x' }];
+
+test('a cancel that never answers does not hold the race up, on a timeout or on an error', async () => {
+  const hangingCancel = runtime => {
+    runtime.cancelJob = () => {
+      runtime.calls.cancel += 1;
+      return new Promise(() => {});
+    };
+    return runtime;
+  };
+
+  const slow = hangingCancel(fakeRuntime({ statuses: ['running'] }));
+  await assert.rejects(
+    () => runRace(slow, { messages: ask, attempts: 2, timeoutMs: 4_000, pollMs: 2_000, ...fakeClock() }),
+    error => error instanceof ProviderError && error.code === 'race_timeout'
+  );
+  assert.equal(slow.calls.cancel, 1);
+
+  const outage = new ProviderError('offline', 'down');
+  const failing = hangingCancel(fakeRuntime());
+  failing.getJob = async () => {
+    throw outage;
+  };
+  await assert.rejects(
+    () => runRace(failing, { messages: ask, attempts: 2, ...fakeClock() }),
+    error => error === outage
+  );
+  assert.equal(failing.calls.cancel, 1);
+});
+
+test('a cancel that throws on the spot is swallowed', async () => {
+  const runtime = fakeRuntime({ statuses: ['running'] });
+  runtime.cancelJob = () => {
+    throw new Error('cannot even start');
+  };
+
+  await assert.rejects(
+    () => runRace(runtime, { messages: ask, attempts: 2, timeoutMs: 2_000, pollMs: 1_000, ...fakeClock() }),
+    error => error instanceof ProviderError && error.code === 'race_timeout'
+  );
+});
+
+test('the pause between polls is cut to the time left before the deadline', async () => {
+  let time = 0;
+  const sleeps = [];
+  const runtime = fakeRuntime({ statuses: ['running'] });
+
+  await assert.rejects(() =>
+    runRace(runtime, {
+      messages: ask,
+      attempts: 2,
+      timeoutMs: 5_000,
+      graceMs: 1_000,
+      pollMs: 2_000,
+      now: () => time,
+      sleep: async ms => {
+        sleeps.push(ms);
+        time += ms;
+      }
+    })
+  );
+
+  assert.deepEqual(sleeps, [2_000, 2_000, 1_000], 'the last pause is 1 s, not 2 s');
+});
+
+test('a request is given exactly the time that is left, even when that is under a second', async () => {
+  let time = 0;
+  const timeouts = [];
+  const runtime = fakeRuntime({ statuses: ['running'] });
+  const getJob = runtime.getJob;
+  runtime.getJob = (id, options) => {
+    timeouts.push(options.timeoutMs);
+    return getJob(id, options);
+  };
+
+  await assert.rejects(() =>
+    runRace(runtime, {
+      messages: ask,
+      attempts: 2,
+      timeoutMs: 1_800,
+      graceMs: 0,
+      pollMs: 1_000,
+      now: () => time,
+      sleep: async ms => {
+        time += ms;
+      }
+    })
+  );
+
+  assert.deepEqual(timeouts, [1_800, 800], 'the second poll has 0.8 s left and is given 0.8 s');
+  assert.equal(runtime.calls.get, 2, 'nothing is sent once the time is up');
+});
+
+test('no request is sent once the hard deadline has passed; the race is only cancelled', async () => {
+  let time = 0;
+  const runtime = fakeRuntime({ statuses: ['running'] });
+  runtime.submitRace = async () => {
+    time = 10_000; // the submit itself took far longer than the whole budget
+    return { id: 'job_test' };
+  };
+
+  await assert.rejects(
+    () => runRace(runtime, { messages: ask, attempts: 3, timeoutMs: 1_000, graceMs: 0, now: () => time, sleep: async () => {} }),
+    error => error instanceof ProviderError && error.code === 'race_timeout'
+  );
+
+  assert.equal(runtime.calls.get, 0, 'no poll');
+  assert.deepEqual(runtime.calls.attempt, [], 'no attempt read');
+  assert.equal(runtime.calls.cancel, 1, 'but the job is stopped');
+});
