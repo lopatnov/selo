@@ -673,3 +673,22 @@ test('getJob, getJobAttempt and cancelJob use the documented job routes', async 
     { url: 'http://runtime.test:8088/v1/jobs/job_x/cancel', method: 'POST', hasBody: false }
   ]);
 });
+
+test('a job request can be given a shorter timeout, and a hung runtime is then reported as offline', async () => {
+  const { runtime } = makeRuntime({
+    baseUrl: 'http://runtime.test:8088/v1',
+    fetchImpl: (url, init) =>
+      new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' }));
+        });
+      })
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => runtime.getJob('job_slow', { timeoutMs: 30 }),
+    error => error instanceof ProviderError && error.code === 'offline' && /Timed out/.test(error.message)
+  );
+  assert.ok(Date.now() - startedAt < 2_000, 'it gave up at its own timeout, not the 30 s default');
+});

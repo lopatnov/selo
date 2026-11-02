@@ -608,7 +608,7 @@ function createMeterlessRuntime(options = {}) {
    * jobs the cockpit submits. Resolves with the parsed JSON body; a refusal is a
    * ProviderError carrying the runtime's own message.
    */
-  async function jobRequest(pathname, { method = 'GET', body } = {}) {
+  async function jobRequest(pathname, { method = 'GET', body, timeoutMs = JOB_REQUEST_TIMEOUT_MS } = {}) {
     let response;
     let parsed = null;
     try {
@@ -619,7 +619,7 @@ function createMeterlessRuntime(options = {}) {
           headers: buildHeaders({ json: body !== undefined }),
           ...(body === undefined ? {} : { body: JSON.stringify(body) })
         },
-        JOB_REQUEST_TIMEOUT_MS
+        timeoutMs
       ));
     } catch (error) {
       throw new ProviderError('offline', describeFailure(error, `/v1${pathname}`), { cause: error });
@@ -673,16 +673,17 @@ function createMeterlessRuntime(options = {}) {
 
   const jobPath = id => `/jobs/${encodeURIComponent(id)}`;
 
-  function getJob(id) {
-    return jobRequest(jobPath(id));
+  // `options.timeoutMs` shortens the wait for one call (never above the default).
+  function getJob(id, options = {}) {
+    return jobRequest(jobPath(id), options);
   }
 
-  function getJobAttempt(id, seq) {
-    return jobRequest(`${jobPath(id)}/attempts/${encodeURIComponent(seq)}`);
+  function getJobAttempt(id, seq, options = {}) {
+    return jobRequest(`${jobPath(id)}/attempts/${encodeURIComponent(seq)}`, options);
   }
 
-  function cancelJob(id) {
-    return jobRequest(`${jobPath(id)}/cancel`, { method: 'POST' });
+  function cancelJob(id, options = {}) {
+    return jobRequest(`${jobPath(id)}/cancel`, { ...options, method: 'POST' });
   }
 
   /** The provider contract: a plain string answer. */

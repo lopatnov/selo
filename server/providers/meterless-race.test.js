@@ -208,3 +208,98 @@ test('describeAttempt and countLanes cope with the shapes the runtime uses', () 
   assert.equal(countLanes({ lane_stats: [{}, {}, {}] }), 3);
   assert.equal(countLanes({}), null);
 });
+
+test('when polling fails the race is cancelled, once, and the original error is rethrown', async () => {
+  const outage = new ProviderError('offline', 'Could not reach /v1/jobs/job_test.');
+  let polls = 0;
+  const runtime = fakeRuntime({ statuses: ['running'] });
+  runtime.getJob = async () => {
+    polls += 1;
+    if (polls === 2) throw outage;
+    return { id: 'job_test', status: 'running' };
+  };
+
+  await assert.rejects(
+    () => runRace(runtime, { messages: [{ role: 'user', content: 'x' }], attempts: 3, ...fakeClock() }),
+    error => error === outage
+  );
+  assert.equal(runtime.calls.cancel, 1, 'the race stops spending cloud tokens');
+});
+
+test('a cancel that itself fails does not hide the polling error', async () => {
+  const outage = new ProviderError('unauthorized', 'rejected');
+  const runtime = fakeRuntime();
+  runtime.getJob = async () => {
+    throw outage;
+  };
+  runtime.cancelJob = async () => {
+    throw new Error('cancel failed too');
+  };
+
+  await assert.rejects(
+    () => runRace(runtime, { messages: [{ role: 'user', content: 'x' }], attempts: 2, ...fakeClock() }),
+    error => error === outage
+  );
+});
+
+test('reading attempts stops at the hard deadline, however slow each read is', async () => {
+  let time = 0;
+  const reads = [];
+  const runtime = fakeRuntime({ job: { generated: 6 } });
+  runtime.getJobAttempt = async (id, seq) => {
+    reads.push(seq);
+    time += 20_000; // every read takes 20 s
+    return null;
+  };
+
+  await assert.rejects(
+    () =>
+      runRace(runtime, {
+        messages: [{ role: 'user', content: 'x' }],
+        attempts: 6,
+        timeoutMs: 10_000,
+        graceMs: 5_000,
+        now: () => time,
+        sleep: async ms => {
+          time += ms;
+        }
+      }),
+    error => error instanceof ProviderError && error.code === 'race_timeout'
+  );
+  assert.equal(reads.length, 1, 'the first read already used up the budget; the other five were skipped');
+});
+
+test('every request waits no longer than the time left, and never more than the request cap', async () => {
+  let time = 0;
+  const seen = [];
+  const runtime = fakeRuntime({ statuses: ['running', 'running', 'completed'], job: { winner_seq: 1, generated: 1 }, attempts: { 1: lane('a', 'ok') } });
+  const record = name => fn =>
+    async (...args) => {
+      seen.push({ name, timeoutMs: args[args.length - 1]?.timeoutMs });
+      return fn(...args);
+    };
+  runtime.getJob = record('getJob')(runtime.getJob);
+  runtime.getJobAttempt = record('getJobAttempt')(runtime.getJobAttempt);
+
+  await runRace(runtime, {
+    messages: [{ role: 'user', content: 'x' }],
+    attempts: 2,
+    timeoutMs: 20_000,
+    graceMs: 4_000,
+    pollMs: 3_000,
+    now: () => time,
+    sleep: async ms => {
+      time += ms;
+    }
+  });
+
+  // Hard deadline 24 s: the first poll may wait the 30 s cap's worth of what is left (24 s),
+  // later ones less, and none ever more than what remains.
+  assert.equal(seen[0].name, 'getJob');
+  assert.equal(seen[0].timeoutMs, 24_000);
+  assert.equal(seen[1].timeoutMs, 21_000);
+  assert.equal(seen[2].timeoutMs, 18_000);
+  assert.equal(seen.at(-1).name, 'getJobAttempt');
+  assert.equal(seen.at(-1).timeoutMs, 18_000);
+  for (const call of seen) assert.ok(call.timeoutMs >= 1_000 && call.timeoutMs <= 30_000);
+});

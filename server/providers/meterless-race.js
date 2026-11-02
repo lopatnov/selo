@@ -19,11 +19,14 @@
  * an ordinary chat call.
  */
 
-const { ProviderError } = require('./meterless-runtime');
+const { JOB_REQUEST_TIMEOUT_MS, ProviderError } = require('./meterless-runtime');
 
 // Longer than a chat call, shorter than a night: a summary waits for this.
 const RACE_TIMEOUT_MS = 150_000;
 const RACE_POLL_MS = 2_000;
+// After the race deadline there is still a cancel and a read of what landed;
+// together they get this much, and no request is allowed past it.
+const RACE_GRACE_MS = 15_000;
 const FINAL_STATUSES = new Set(['completed', 'cancelled', 'errored', 'failed']);
 
 const sleepFor = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -58,23 +61,26 @@ function candidateSeqs(job, attempts) {
   return [...new Set([...listed, ...all])];
 }
 
-/** The first attempt in `seqs` that has text; sequential, so the winner is read first. */
-async function firstUsable(runtime, jobId, seqs) {
-  if (seqs.length === 0) return null;
+/**
+ * The first attempt in `seqs` that has text; sequential, so the winner is read
+ * first. Stops, empty-handed, once the hard deadline has passed.
+ */
+async function firstUsable(runtime, jobId, seqs, { hardDeadline, now, budget }) {
+  if (seqs.length === 0 || now() >= hardDeadline) return null;
   const [seq, ...rest] = seqs;
-  const attempt = await runtime.getJobAttempt(jobId, seq).catch(() => null);
+  const attempt = await runtime.getJobAttempt(jobId, seq, budget()).catch(() => null);
   return usableText(attempt) && attempt.ok !== false
     ? { seq, attempt }
-    : firstUsable(runtime, jobId, rest);
+    : firstUsable(runtime, jobId, rest, { hardDeadline, now, budget });
 }
 
-/** Poll until the job is in a final status; `null` when the deadline passes first. */
-async function waitForJob(runtime, jobId, { deadline, pollMs, sleep, now }) {
-  const job = await runtime.getJob(jobId);
+/** Poll until the job is in a final status; flagged `timedOut` when the deadline passes first. */
+async function waitForJob(runtime, jobId, { deadline, pollMs, sleep, now, budget }) {
+  const job = await runtime.getJob(jobId, budget());
   if (FINAL_STATUSES.has(String(job?.status))) return job;
   if (now() >= deadline) return { ...job, timedOut: true };
   await sleep(pollMs);
-  return waitForJob(runtime, jobId, { deadline, pollMs, sleep, now });
+  return waitForJob(runtime, jobId, { deadline, pollMs, sleep, now, budget });
 }
 
 /**
@@ -93,6 +99,7 @@ async function runRace(
     attempts,
     title,
     timeoutMs = RACE_TIMEOUT_MS,
+    graceMs = RACE_GRACE_MS,
     pollMs = RACE_POLL_MS,
     sleep = sleepFor,
     now = Date.now
@@ -103,23 +110,39 @@ async function runRace(
   }
 
   const startedAt = now();
+  const deadline = startedAt + timeoutMs;
+  // Nothing after the submit may outlive this, however slow the runtime is.
+  const hardDeadline = deadline + graceMs;
+  // Each request waits no longer than the time that is left.
+  const budget = () => ({
+    timeoutMs: Math.max(1_000, Math.min(JOB_REQUEST_TIMEOUT_MS, hardDeadline - now()))
+  });
+
   const { id } = await runtime.submitRace({ messages, attempts, title });
-  const job = await waitForJob(runtime, id, { deadline: startedAt + timeoutMs, pollMs, sleep, now });
+
+  let job;
+  try {
+    job = await waitForJob(runtime, id, { deadline, pollMs, sleep, now, budget });
+  } catch (error) {
+    // Nobody is waiting for this race any more: stop it spending cloud tokens.
+    await runtime.cancelJob(id, budget()).catch(() => {});
+    throw error;
+  }
 
   const timedOut = job.timedOut === true;
   if (timedOut) {
-    // Stop spending cloud tokens on a race nobody is waiting for any more.
-    await runtime.cancelJob(id).catch(() => {});
+    await runtime.cancelJob(id, budget()).catch(() => {});
   } else if (job.status !== 'completed') {
     throw new ProviderError('race_failed', `The race ended as "${job.status}", with no answer.`);
   }
 
-  const found = await firstUsable(runtime, id, candidateSeqs(job, attempts));
+  const found = await firstUsable(runtime, id, candidateSeqs(job, attempts), { hardDeadline, now, budget });
   if (!found) {
+    const outOfTime = timedOut || now() >= hardDeadline;
     throw new ProviderError(
-      timedOut ? 'race_timeout' : 'race_empty',
-      timedOut
-        ? `The race had no usable attempt after ${Math.round(timeoutMs / 1000)} s and was cancelled.`
+      outOfTime ? 'race_timeout' : 'race_empty',
+      outOfTime
+        ? `The race had no usable attempt within ${Math.round((timeoutMs + graceMs) / 1000)} s and was cancelled.`
         : 'The race finished but none of its attempts has an answer.'
     );
   }
@@ -138,6 +161,7 @@ async function runRace(
 
 module.exports = {
   FINAL_STATUSES,
+  RACE_GRACE_MS,
   RACE_POLL_MS,
   RACE_TIMEOUT_MS,
   candidateSeqs,
