@@ -21,6 +21,15 @@
  *       `discuss`    the parallel conversation itself (per-lane pacing/limits);
  *       `summarize`  fan-in: one personality writes the closing summary.
  *
+ *  - `raceSummary` / `raceReplies` / `raceAttempts` — write the closing summary
+ *    (and, with `raceReplies`, every reply and opening of the AI personalities)
+ *    as a Nightshift race instead of one chat call: the runtime runs
+ *    `raceAttempts` attempts across its racing lanes (one lane per model, so
+ *    Nightshift draws one star per lane) and the winning attempt becomes the
+ *    message. Both are off by default; when a race fails or takes too long the
+ *    message is written the normal way. A race replaces the personality's own
+ *    model with the runtime's lanes and costs `raceAttempts` times the tokens.
+ *
  * The values are stored flat in the JSON state file, so no migration is
  * needed: a state file written before this setting existed simply falls back
  * to the defaults.
@@ -29,12 +38,16 @@
 const DEFAULT_APP_SETTINGS = Object.freeze({
   agentsPerNews: 1,
   parallelLanes: 1,
-  pipeline: Object.freeze({ analyze: true, discuss: true, summarize: false })
+  pipeline: Object.freeze({ analyze: true, discuss: true, summarize: false }),
+  raceSummary: false,
+  raceReplies: false,
+  raceAttempts: 5
 });
 
 const APP_SETTINGS_LIMITS = Object.freeze({
   agentsPerNews: Object.freeze({ min: 1, max: 5 }),
-  parallelLanes: Object.freeze({ min: 1, max: 5 })
+  parallelLanes: Object.freeze({ min: 1, max: 5 }),
+  raceAttempts: Object.freeze({ min: 2, max: 12 })
 });
 
 function toInteger(value, fallback) {
@@ -98,7 +111,13 @@ function normalizeAppSettings(raw = {}) {
     // actually produce more speaking lanes, not just a higher (unused) cap.
     agentsPerNews: Math.max(agentsPerNews, parallelLanes),
     parallelLanes,
-    pipeline: normalizePipeline(source.pipeline)
+    pipeline: normalizePipeline(source.pipeline),
+    raceSummary: toBoolean(source.raceSummary, DEFAULT_APP_SETTINGS.raceSummary),
+    raceReplies: toBoolean(source.raceReplies, DEFAULT_APP_SETTINGS.raceReplies),
+    raceAttempts: clamp(
+      toInteger(source.raceAttempts, DEFAULT_APP_SETTINGS.raceAttempts),
+      APP_SETTINGS_LIMITS.raceAttempts
+    )
   };
 }
 

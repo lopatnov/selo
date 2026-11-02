@@ -63,6 +63,32 @@ function AgentActivityLine({ agents, activity }) {
   );
 }
 
+/** The hover text of a race badge: what the Nightshift job was and who won it. */
+function describeRace(race) {
+  const lanes = race.lanes ? ` on ${race.lanes} lanes` : '';
+  const failed = race.failed ? ` (${race.failed} failed)` : '';
+  const attempts = race.attempts ? `${race.attempts} attempts${failed}` : 'a race';
+  const winner = race.model && race.model !== race.lane ? ` (${race.model})` : '';
+  const partial = race.partial ? ' The race was cut short; this is the best attempt that had landed.' : '';
+  return `Won a Nightshift race: ${attempts}${lanes}. Winning lane: ${race.lane || 'unknown'}${winner}. Job ${race.jobId}.${partial}`;
+}
+
+/** The badge on a summary that a Nightshift race wrote; nothing for any other comment. */
+function RaceBadge({ race, commentId }) {
+  if (!race) return null;
+  const attempts = race.attempts ? ` · ${race.attempts} attempts` : '';
+  return (
+    <span
+      className="comment-badge race"
+      data-testid={`race-badge-${commentId}`}
+      title={describeRace(race)}
+    >
+      🏁 {race.lane || 'race'}
+      {attempts}
+    </span>
+  );
+}
+
 const PHASES = {
   analyze: { label: 'Analysis', emoji: '🔍' },
   discuss: { label: 'Discussion', emoji: '💬' },
@@ -609,6 +635,7 @@ function NewsFeed() {
                               >
                                 {comment.isSummary ? '🧾 Summary' : comment.isAI ? 'AI' : 'User'}
                               </span>
+                              <RaceBadge race={comment.race} commentId={comment.id} />
                               <span className="comment-time">
                                 {formatDate(comment.timestamp)}
                               </span>

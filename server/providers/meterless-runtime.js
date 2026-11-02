@@ -28,6 +28,8 @@ const STATUS_TIMEOUT_MS = 15_000;
 const MODELS_TIMEOUT_MS = 20_000;
 const DETECT_TIMEOUT_MS = 2_500;
 const CLASSES_TIMEOUT_MS = 15_000;
+// Submitting, reading or cancelling a job is bookkeeping, not generation.
+const JOB_REQUEST_TIMEOUT_MS = 30_000;
 
 const KEY_TOKEN = 'meterless_runtime_token';
 const KEY_BASE_URL = 'meterless_base_url';
@@ -601,6 +603,89 @@ function createMeterlessRuntime(options = {}) {
     return { content, reasoning, model, durationMs: Date.now() - startedAt };
   }
 
+  /**
+   * One call to the runtime's jobs plane (`/v1/jobs…`): the same Nightshift
+   * jobs the cockpit submits. Resolves with the parsed JSON body; a refusal is a
+   * ProviderError carrying the runtime's own message.
+   */
+  async function jobRequest(pathname, { method = 'GET', body, timeoutMs = JOB_REQUEST_TIMEOUT_MS } = {}) {
+    let response;
+    let parsed = null;
+    try {
+      ({ response, body: parsed } = await fetchJson(
+        `${resolveBaseUrl()}${pathname}`,
+        {
+          method,
+          headers: buildHeaders({ json: body !== undefined }),
+          ...(body === undefined ? {} : { body: JSON.stringify(body) })
+        },
+        timeoutMs
+      ));
+    } catch (error) {
+      throw new ProviderError('offline', describeFailure(error, `/v1${pathname}`), { cause: error });
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      throw new ProviderError(
+        'unauthorized',
+        'Meterless Runtime rejected the token. Paste the token from <stateDir>/proxy-token.',
+        { status: response.status }
+      );
+    }
+    if (!response.ok) {
+      const reason = parsed?.error?.message || parsed?.error || `HTTP ${response.status}`;
+      throw new ProviderError(
+        parsed?.error?.code || 'job_refused',
+        `Meterless Runtime refused the job request: ${String(reason).slice(0, 200)}`,
+        { status: response.status }
+      );
+    }
+    return parsed;
+  }
+
+  /**
+   * Submit a Nightshift race: `attempts` attempts of the same messages across the
+   * runtime's racing lanes (one lane per model). `window: 'now'` runs it at once
+   * instead of waiting for the quiet window. Resolves with `{ id, job }`.
+   */
+  async function submitRace({ messages, attempts, title, privacy = 'cloud-ok' } = {}) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      throw new ProviderError('invalid_request', 'A race needs messages.');
+    }
+    const job = await jobRequest('/jobs', {
+      method: 'POST',
+      body: {
+        kind: 'best_of_n',
+        messages,
+        n: attempts,
+        window: 'now',
+        privacy,
+        app: appId,
+        ...(title ? { title } : {})
+      }
+    });
+    const id = job?.id || job?.job?.id || job?.data?.id || null;
+    if (!id) {
+      throw new ProviderError('invalid_response', 'The runtime accepted the race but returned no job id.');
+    }
+    return { id, job };
+  }
+
+  const jobPath = id => `/jobs/${encodeURIComponent(id)}`;
+
+  // `options.timeoutMs` shortens the wait for one call (never above the default).
+  function getJob(id, options = {}) {
+    return jobRequest(jobPath(id), options);
+  }
+
+  function getJobAttempt(id, seq, options = {}) {
+    return jobRequest(`${jobPath(id)}/attempts/${encodeURIComponent(seq)}`, options);
+  }
+
+  function cancelJob(id, options = {}) {
+    return jobRequest(`${jobPath(id)}/cancel`, { ...options, method: 'POST' });
+  }
+
   /** The provider contract: a plain string answer. */
   async function chat(options = {}) {
     const { content } = await chatDetailed(options);
@@ -682,6 +767,10 @@ function createMeterlessRuntime(options = {}) {
     listClasses,
     chat,
     chatDetailed,
+    submitRace,
+    getJob,
+    getJobAttempt,
+    cancelJob,
     autoDetect,
     checkHealth,
     resolveToken,
@@ -696,6 +785,7 @@ module.exports = {
   CLASSES_TIMEOUT_MS,
   DEFAULT_APP_ID,
   DEFAULT_DISPOSITIONS,
+  JOB_REQUEST_TIMEOUT_MS,
   KEY_BASE_URL,
   KEY_TOKEN,
   MODELS_TIMEOUT_MS,

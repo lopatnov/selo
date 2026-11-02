@@ -23,6 +23,10 @@ function UsersList() {
   const [agentsPerNews, setAgentsPerNews] = useState(1);
   const [parallelLanes, setParallelLanes] = useState(1);
   const [pipeline, setPipeline] = useState(DEFAULT_PIPELINE);
+  // Write the closing summary, and/or every reply, as a Nightshift race (one lane per model).
+  const [raceSummary, setRaceSummary] = useState(false);
+  const [raceReplies, setRaceReplies] = useState(false);
+  const [raceAttempts, setRaceAttempts] = useState(5);
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState('');
 
@@ -41,9 +45,58 @@ function UsersList() {
         discuss: data.pipeline?.discuss ?? DEFAULT_PIPELINE.discuss,
         summarize: data.pipeline?.summarize ?? DEFAULT_PIPELINE.summarize
       });
+      setRaceSummary(data.raceSummary === true);
+      setRaceReplies(data.raceReplies === true);
+      setRaceAttempts(Number(data.raceAttempts) || 5);
     } catch (err) {
       console.error('Failed to load the discussion settings:', err);
     }
+  };
+
+  // The race settings are saved the same way: show the change, ask the server,
+  // and put the old value back if it refuses.
+  const saveRaceSetting = async (patch, show, undo) => {
+    show(patch);
+    setSavingSettings(true);
+    setSettingsError('');
+    try {
+      const { data } = await axios.put(`${API_BASE}/settings`, patch);
+      setRaceSummary(data.raceSummary === true);
+      setRaceReplies(data.raceReplies === true);
+      setRaceAttempts(Number(data.raceAttempts) || 5);
+    } catch (err) {
+      undo();
+      setSettingsError(readError(err));
+    } finally {
+      setSavingSettings(false);
+    }
+  };
+
+  const handleRaceSummary = event => {
+    const previous = raceSummary;
+    return saveRaceSetting(
+      { raceSummary: event.target.checked },
+      patch => setRaceSummary(patch.raceSummary),
+      () => setRaceSummary(previous)
+    );
+  };
+
+  const handleRaceReplies = event => {
+    const previous = raceReplies;
+    return saveRaceSetting(
+      { raceReplies: event.target.checked },
+      patch => setRaceReplies(patch.raceReplies),
+      () => setRaceReplies(previous)
+    );
+  };
+
+  const handleRaceAttempts = event => {
+    const previous = raceAttempts;
+    return saveRaceSetting(
+      { raceAttempts: Number(event.target.value) },
+      patch => setRaceAttempts(patch.raceAttempts),
+      () => setRaceAttempts(previous)
+    );
   };
 
   const handleAgentsPerNews = async (event) => {
@@ -270,6 +323,60 @@ function UsersList() {
                 disabled={savingSettings}
               />
               <span>🧾 Summary</span>
+            </label>
+          </div>
+        </div>
+
+        <div className="agent-settings-row" data-testid="race-settings">
+          <div className="agent-settings-text">
+            <label htmlFor="race-summary">🏁 Race in Nightshift</label>
+            <p className="agent-settings-hint">
+              Write a message as a Nightshift race instead of one chat call: the runtime runs
+              several attempts on its racing lanes (one lane per model, so Nightshift shows a
+              star for each) and the winning attempt is the message. Race the closing{' '}
+              <strong>summary</strong> (needs the Summary stage above), and/or{' '}
+              <strong>every reply</strong>, the openings included. A race uses the
+              runtime&apos;s lanes instead of the personality&apos;s own model and sends as many
+              requests as it has attempts, so racing every reply is slower and costs much more,
+              and starts one Nightshift job per message. If a race fails or takes longer than
+              two and a half minutes, the message is written the normal way.
+            </p>
+          </div>
+          <div className="pipeline-toggles">
+            <label className="pipeline-toggle">
+              <input
+                id="race-summary"
+                type="checkbox"
+                checked={raceSummary}
+                onChange={handleRaceSummary}
+                disabled={savingSettings}
+              />
+              <span>Summary</span>
+            </label>
+            <label className="pipeline-toggle">
+              <input
+                id="race-replies"
+                type="checkbox"
+                checked={raceReplies}
+                onChange={handleRaceReplies}
+                disabled={savingSettings}
+              />
+              <span>Every reply</span>
+            </label>
+            <label className="pipeline-toggle">
+              <select
+                id="race-attempts"
+                aria-label="Race attempts"
+                value={raceAttempts}
+                onChange={handleRaceAttempts}
+                disabled={savingSettings || !(raceSummary || raceReplies)}
+              >
+                {Array.from({ length: 11 }, (_, index) => index + 2).map(value => (
+                  <option key={value} value={value}>
+                    {value} attempts
+                  </option>
+                ))}
+              </select>
             </label>
           </div>
         </div>

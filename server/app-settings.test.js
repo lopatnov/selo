@@ -58,7 +58,10 @@ test('form strings are understood and unknown keys are dropped', () => {
   assert.deepEqual(settings, {
     agentsPerNews: 4,
     parallelLanes: 1,
-    pipeline: { analyze: true, discuss: true, summarize: false }
+    pipeline: { analyze: true, discuss: true, summarize: false },
+    raceSummary: false,
+    raceReplies: false,
+    raceAttempts: 5
   });
 });
 
@@ -91,4 +94,35 @@ test('pipeline booleans accept strings and fall back on garbage', () => {
     discuss: true,
     summarize: false
   });
+});
+
+test('the summary race is off by default and its attempts are clamped to 2..12', () => {
+  assert.equal(DEFAULT_APP_SETTINGS.raceSummary, false);
+  assert.equal(DEFAULT_APP_SETTINGS.raceAttempts, 5);
+  assert.equal(normalizeAppSettings({ raceAttempts: 1 }).raceAttempts, 2);
+  assert.equal(normalizeAppSettings({ raceAttempts: 99 }).raceAttempts, 12);
+  assert.equal(normalizeAppSettings({ raceAttempts: '6' }).raceAttempts, 6);
+  assert.equal(normalizeAppSettings({ raceAttempts: 'lots' }).raceAttempts, 5);
+});
+
+test('raceSummary accepts booleans and form strings and falls back on garbage', () => {
+  assert.equal(normalizeAppSettings({ raceSummary: true }).raceSummary, true);
+  assert.equal(normalizeAppSettings({ raceSummary: 'on' }).raceSummary, true);
+  assert.equal(normalizeAppSettings({ raceSummary: 'off' }).raceSummary, false);
+  assert.equal(normalizeAppSettings({ raceSummary: 'maybe' }).raceSummary, false);
+  // A saved state without the setting keeps working.
+  assert.equal(normalizeAppSettings({ agentsPerNews: 2 }).raceSummary, false);
+});
+
+test('racing every reply is off by default and independent of the summary race', () => {
+  assert.equal(DEFAULT_APP_SETTINGS.raceReplies, false);
+  assert.equal(normalizeAppSettings({}).raceReplies, false);
+  assert.equal(normalizeAppSettings({ raceReplies: true }).raceReplies, true);
+  assert.equal(normalizeAppSettings({ raceReplies: 'on' }).raceReplies, true);
+  assert.equal(normalizeAppSettings({ raceReplies: 'maybe' }).raceReplies, false);
+
+  const onlyReplies = normalizeAppSettings({ raceReplies: true });
+  assert.equal(onlyReplies.raceSummary, false);
+  const onlySummary = normalizeAppSettings({ raceSummary: true });
+  assert.equal(onlySummary.raceReplies, false);
 });

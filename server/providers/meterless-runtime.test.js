@@ -559,3 +559,136 @@ test('listClasses reads live state; missing route and wrong token degrade', asyn
   });
   assert.equal((await unauthorized.runtime.listClasses()).status, 'unauthorized');
 });
+
+test('submitRace posts a best-of-n job that runs now, as this app, with the real token', async () => {
+  let captured;
+  const { runtime } = makeRuntime({
+    baseUrl: 'http://runtime.test:8088/v1',
+    fetchImpl: async (url, init) => {
+      captured = { url, init };
+      return jsonResponse(200, { id: 'job_abc123', status: 'queued' });
+    }
+  });
+
+  const result = await runtime.submitRace({
+    messages: [{ role: 'user', content: 'Summarise this thread' }],
+    attempts: 5,
+    title: 'Summary of a news item'
+  });
+
+  assert.equal(result.id, 'job_abc123');
+  assert.equal(captured.url, 'http://runtime.test:8088/v1/jobs');
+  assert.equal(captured.init.method, 'POST');
+  assert.equal(captured.init.headers.Authorization, 'Bearer rt-test');
+  assert.equal(captured.init.headers['meterless-app'], 'test-app');
+  assert.equal(captured.init.headers['Content-Type'], 'application/json');
+  assert.deepEqual(JSON.parse(captured.init.body), {
+    kind: 'best_of_n',
+    messages: [{ role: 'user', content: 'Summarise this thread' }],
+    n: 5,
+    window: 'now',
+    privacy: 'cloud-ok',
+    app: 'test-app',
+    title: 'Summary of a news item'
+  });
+});
+
+test('submitRace finds the job id however the runtime wraps it', async () => {
+  for (const body of [{ id: 'job_1' }, { job: { id: 'job_1' } }, { data: { id: 'job_1' } }]) {
+    const { runtime } = makeRuntime({ fetchImpl: async () => jsonResponse(200, body) });
+    const { id } = await runtime.submitRace({ messages: [{ role: 'user', content: 'x' }], attempts: 2 });
+    assert.equal(id, 'job_1');
+  }
+
+  const { runtime } = makeRuntime({ fetchImpl: async () => jsonResponse(200, { status: 'queued' }) });
+  await assert.rejects(
+    () => runtime.submitRace({ messages: [{ role: 'user', content: 'x' }], attempts: 2 }),
+    error => error instanceof ProviderError && error.code === 'invalid_response'
+  );
+});
+
+test('submitRace needs messages and never reaches the network without them', async () => {
+  let called = false;
+  const { runtime } = makeRuntime({
+    fetchImpl: async () => {
+      called = true;
+      return jsonResponse(200, {});
+    }
+  });
+
+  await assert.rejects(
+    () => runtime.submitRace({ messages: [], attempts: 3 }),
+    error => error instanceof ProviderError && error.code === 'invalid_request'
+  );
+  assert.equal(called, false);
+});
+
+test('job requests report a wrong token as unauthorized and a refusal with the runtime\'s own words', async () => {
+  const wrongToken = makeRuntime({ fetchImpl: async () => jsonResponse(401, { error: 'nope' }) });
+  await assert.rejects(
+    () => wrongToken.runtime.getJob('job_1'),
+    error => error instanceof ProviderError && error.code === 'unauthorized'
+  );
+
+  const refused = makeRuntime({
+    fetchImpl: async () => jsonResponse(400, { error: { message: 'n must be a positive number', code: 'invalid_job' } })
+  });
+  await assert.rejects(
+    () => refused.runtime.submitRace({ messages: [{ role: 'user', content: 'x' }], attempts: 2 }),
+    error =>
+      error instanceof ProviderError &&
+      error.code === 'invalid_job' &&
+      error.status === 400 &&
+      /n must be a positive number/.test(error.message)
+  );
+
+  const down = makeRuntime({
+    fetchImpl: async () => {
+      throw new Error('ECONNREFUSED');
+    }
+  });
+  await assert.rejects(
+    () => down.runtime.getJob('job_1'),
+    error => error instanceof ProviderError && error.code === 'offline'
+  );
+});
+
+test('getJob, getJobAttempt and cancelJob use the documented job routes', async () => {
+  const calls = [];
+  const { runtime } = makeRuntime({
+    baseUrl: 'http://runtime.test:8088/v1',
+    fetchImpl: async (url, init) => {
+      calls.push({ url, method: init.method, hasBody: init.body !== undefined });
+      return jsonResponse(200, { ok: true });
+    }
+  });
+
+  await runtime.getJob('job_x/1');
+  await runtime.getJobAttempt('job_x', 7);
+  await runtime.cancelJob('job_x');
+
+  assert.deepEqual(calls, [
+    { url: 'http://runtime.test:8088/v1/jobs/job_x%2F1', method: 'GET', hasBody: false },
+    { url: 'http://runtime.test:8088/v1/jobs/job_x/attempts/7', method: 'GET', hasBody: false },
+    { url: 'http://runtime.test:8088/v1/jobs/job_x/cancel', method: 'POST', hasBody: false }
+  ]);
+});
+
+test('a job request can be given a shorter timeout, and a hung runtime is then reported as offline', async () => {
+  const { runtime } = makeRuntime({
+    baseUrl: 'http://runtime.test:8088/v1',
+    fetchImpl: (url, init) =>
+      new Promise((resolve, reject) => {
+        init.signal.addEventListener('abort', () => {
+          reject(Object.assign(new Error('timed out'), { name: 'TimeoutError' }));
+        });
+      })
+  });
+
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => runtime.getJob('job_slow', { timeoutMs: 30 }),
+    error => error instanceof ProviderError && error.code === 'offline' && /Timed out/.test(error.message)
+  );
+  assert.ok(Date.now() - startedAt < 2_000, 'it gave up at its own timeout, not the 30 s default');
+});

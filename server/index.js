@@ -14,6 +14,7 @@ const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { createZetarisStore } = require('./zetaris-store');
 const { createPersistence } = require('./persistence');
+const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
 const { sanitizeModelText } = require('./meterless-text');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
@@ -321,12 +322,9 @@ function describeMeterlessFailure(error, model = '') {
 // Returns { answer, think, entry, error }: `answer` is sanitised text safe to
 // post, `think` is the reasoning that must never become a comment, `error`
 // carries { code, message, attempts } when no answer could be produced.
-async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
-  const model =
-    typeof user?.modelName === 'string' && user.modelName.trim()
-      ? user.modelName.trim()
-      : 'meterless/auto';
-
+// The system prompt (the personality unless a stage brings its own) and the
+// message list one chat call, or one race, is made of.
+function buildChatMessages({ user, prompt, systemPrompt }) {
   const system =
     typeof systemPrompt === 'string' && systemPrompt.trim()
       ? systemPrompt.trim()
@@ -334,10 +332,22 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
           sanitizeUntrustedInput(user?.personality) || 'an opinionated participant'
         }. Reply with the reaction only, 2-3 sentences.`;
 
-  const messages = [
-    { role: 'system', content: system },
-    { role: 'user', content: prompt }
-  ];
+  return {
+    system,
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: prompt }
+    ]
+  };
+}
+
+async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
+  const model =
+    typeof user?.modelName === 'string' && user.modelName.trim()
+      ? user.modelName.trim()
+      : 'meterless/auto';
+
+  const { system, messages } = buildChatMessages({ user, prompt, systemPrompt });
 
   const startedAt = Date.now();
   const record = {
@@ -432,6 +442,45 @@ async function callMeterlessAI({ newsId = null, user, prompt, systemPrompt }) {
   broadcast('meterless_log_entry', entry);
 
   return { answer: '', think: '', entry, error: reported };
+}
+
+// The same call as a Nightshift race: `attempts` attempts across the runtime's
+// racing lanes, one lane per model, and the winner is the answer. Nightshift
+// draws every lane of a race as a star; a plain chat call is recorded as one
+// "auto" lane however many models the app asks for. A race that fails or takes
+// too long falls back to callMeterlessAI, so it can never leave a stage empty.
+const callMeterlessRace = createRaceCaller({
+  runtime: meterlessRuntime,
+  fallback: callMeterlessAI,
+  buildMessages: buildChatMessages,
+  record: fields => {
+    const entry = meterlessLog.push(fields);
+    logMeterlessCall(entry);
+    broadcast('meterless_log_entry', entry);
+    return entry;
+  },
+  activity,
+  sanitize: sanitizeModelText
+});
+
+// One AI call for a pipeline stage. Where the settings ask for a race (the summary
+// with raceSummary; the openings and replies with raceReplies) it is a Nightshift
+// race, a few at a time; every other call, and every race that cannot answer, is
+// the ordinary chat call. The result is the same either way, plus `race`.
+async function callForStage(stage, call, news) {
+  const settings = currentSettings();
+  if (!shouldRace(settings, stage)) return callMeterlessAI(call);
+
+  await raceSlots.acquire();
+  try {
+    return await callMeterlessRace({
+      ...call,
+      attempts: settings.raceAttempts,
+      title: raceTitle(stage, call.user, news)
+    });
+  } finally {
+    raceSlots.release();
+  }
 }
 
 // Broadcast to WebSocket clients
@@ -558,6 +607,11 @@ function createSemaphore(limit) {
 }
 
 const turnSlots = createSemaphore(DEFAULT_MAX_CONCURRENT_TURNS);
+
+// A race occupies several of the runtime's lanes at once, so only a few run at a
+// time and the other turns wait for their turn (SELO_MAX_CONCURRENT_RACES).
+const DEFAULT_MAX_CONCURRENT_RACES = Number.parseInt(process.env.SELO_MAX_CONCURRENT_RACES, 10) || 2;
+const raceSlots = createSemaphore(DEFAULT_MAX_CONCURRENT_RACES);
 
 // AI users only: the local human participant (isAI: false, modelName: "human")
 // never posts AI replies.
@@ -989,7 +1043,7 @@ async function runAnalysisLane(newsId, news, user, cooldowns, apologized, failur
   broadcastAgentActivity(newsId, user, 'requesting', { laneRole: LANE_ROLES.ANALYST });
 
   const result = await withTurnSlot(laneSlots, () =>
-    callMeterlessAI({ newsId, user, prompt: prompt.user, systemPrompt: prompt.system })
+    callForStage('analyze', { newsId, user, prompt: prompt.user, systemPrompt: prompt.system }, news)
   );
   if (!isDiscussionActive(newsId)) return;
 
@@ -998,7 +1052,8 @@ async function runAnalysisLane(newsId, news, user, cooldowns, apologized, failur
     apologized.delete(user.id);
     failuresByUser.delete(user.id);
     const comment = await addComment(newsId, user.id, result.answer, true, {
-      logEntryId: result.entry?.id ?? null
+      logEntryId: result.entry?.id ?? null,
+      race: result.race
     });
     broadcastAgentActivity(newsId, user, 'success', {
       laneRole: LANE_ROLES.ANALYST,
@@ -1048,7 +1103,7 @@ async function runDebateLane(newsId, news, user, cooldowns, apologized, failures
     // Build the prompt inside the slot so the lane sees the freshest thread.
     const result = await withTurnSlot(laneSlots, () => {
       const prompt = buildDiscussionPrompt(news, user, commentThread(newsId));
-      return callMeterlessAI({ newsId, user, prompt: prompt.user, systemPrompt: prompt.system });
+      return callForStage('discuss', { newsId, user, prompt: prompt.user, systemPrompt: prompt.system }, news);
     });
     if (!isDiscussionActive(newsId)) return;
 
@@ -1057,7 +1112,8 @@ async function runDebateLane(newsId, news, user, cooldowns, apologized, failures
       apologized.delete(user.id);
       failuresByUser.delete(user.id);
       const comment = await addComment(newsId, user.id, result.answer, true, {
-        logEntryId: result.entry?.id ?? null
+        logEntryId: result.entry?.id ?? null,
+        race: result.race
       });
       broadcastAgentActivity(newsId, user, 'success', {
         laneRole: LANE_ROLES.DEBATER,
@@ -1085,12 +1141,14 @@ async function runSummaryLane(newsId, news, summarizer) {
   let result;
   try {
     if (!isDiscussionActive(newsId)) return;
-    result = await callMeterlessAI({
+    const call = {
       newsId,
       user: summarizer,
       prompt: prompt.user,
       systemPrompt: prompt.system
-    });
+    };
+    // A race when the settings ask for one (Users page), else one chat call.
+    result = await callForStage('summarize', call, news);
   } finally {
     turnSlots.release();
   }
@@ -1100,7 +1158,8 @@ async function runSummaryLane(newsId, news, summarizer) {
   if (result.answer && !result.error) {
     await addComment(newsId, summarizer.id, result.answer, true, {
       logEntryId: result.entry?.id ?? null,
-      isSummary: true
+      isSummary: true,
+      race: result.race
     });
     broadcastAgentActivity(newsId, summarizer, 'success', {
       laneRole: LANE_ROLES.SUMMARIZER
@@ -1319,6 +1378,9 @@ async function addComment(newsId, userId, text, isAI = false, extra = {}) {
   if (Number.isInteger(extra.logEntryId)) comment.logEntryId = extra.logEntryId;
   if (extra.isError) comment.isError = true;
   if (extra.isSummary) comment.isSummary = true;
+  // Written by a Nightshift race: which job, which lane won.
+  const race = pickRace(extra.race);
+  if (race) comment.race = race;
   if (extra.error && typeof extra.error === 'object') {
     comment.error = {
       code: typeof extra.error.code === 'string' ? extra.error.code : 'error',

@@ -45,6 +45,18 @@ const AI_COMMENT = {
   logEntryId: 7
 };
 
+const RACE_SUMMARY = {
+  id: 'sum1',
+  newsId: NEWS_ID,
+  userId: 'a1',
+  userName: 'Alice',
+  text: 'A summary written by the winning lane.',
+  isAI: true,
+  isSummary: true,
+  timestamp: '2026-10-27T00:00:08.000Z',
+  race: { jobId: 'job_race1', lane: 'gpt-4o-mini', model: 'gpt-4o-mini', attempts: 5, lanes: 3, failed: 2, partial: false }
+};
+
 const LOG_ENTRY = {
   id: 7,
   at: '2026-10-27T00:00:05.000Z',
@@ -144,6 +156,12 @@ async function installSocketStub(page) {
 
 async function mockApi(page, { postedComments = [], settingsPuts = [] } = {}) {
   let settingsValue = 1;
+  const race = { raceSummary: false, raceReplies: false, raceAttempts: 5 };
+  const settingsBody = () => ({
+    agentsPerNews: settingsValue,
+    ...race,
+    limits: { agentsPerNews: { min: 1, max: 5 } }
+  });
   await page.route('**/api/**', async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -173,13 +191,16 @@ async function mockApi(page, { postedComments = [], settingsPuts = [] } = {}) {
     }
     if (path === '/activity' && method === 'GET') return json(ACTIVITY);
     if (path === '/settings' && method === 'GET') {
-      return json({ agentsPerNews: settingsValue, limits: { agentsPerNews: { min: 1, max: 5 } } });
+      return json(settingsBody());
     }
     if (path === '/settings' && method === 'PUT') {
       const body = request.postDataJSON();
       settingsPuts.push(body);
       settingsValue = Number(body.agentsPerNews) || settingsValue;
-      return json({ agentsPerNews: settingsValue, limits: { agentsPerNews: { min: 1, max: 5 } } });
+      if (typeof body.raceSummary === 'boolean') race.raceSummary = body.raceSummary;
+      if (typeof body.raceReplies === 'boolean') race.raceReplies = body.raceReplies;
+      if (Number.isInteger(body.raceAttempts)) race.raceAttempts = body.raceAttempts;
+      return json(settingsBody());
     }
     if (path === '/comments' && method === 'POST') {
       const body = request.postDataJSON();
@@ -358,4 +379,101 @@ test('the discussion badge follows the live status and agent activity', async ({
     { newsId: NEWS_ID }
   );
   await expect(page.getByText(/👀 Alice · meterless\/auto/)).toBeVisible();
+});
+
+test('the Users page turns the summary race on and sets its attempts', async ({ page }) => {
+  const settingsPuts = [];
+  await mockApi(page, { settingsPuts });
+  await page.goto('/users');
+
+  const race = page.getByTestId('race-settings');
+  await expect(race).toBeVisible();
+  const toggle = race.locator('#race-summary');
+  const attempts = race.getByLabel('Race attempts');
+
+  await expect(toggle).not.toBeChecked();
+  await expect(attempts).toHaveValue('5');
+  await expect(attempts).toBeDisabled();
+
+  await toggle.check();
+  await expect.poll(() => settingsPuts.length).toBe(1);
+  expect(settingsPuts[0]).toEqual({ raceSummary: true });
+  await expect(toggle).toBeChecked();
+  await expect(attempts).toBeEnabled();
+
+  await attempts.selectOption('8');
+  await expect.poll(() => settingsPuts.length).toBe(2);
+  expect(settingsPuts[1]).toEqual({ raceAttempts: 8 });
+  await expect(attempts).toHaveValue('8');
+});
+
+test('racing every reply is its own switch, and either switch enables the attempts', async ({ page }) => {
+  const settingsPuts = [];
+  await mockApi(page, { settingsPuts });
+  await page.goto('/users');
+
+  const race = page.getByTestId('race-settings');
+  const summary = race.locator('#race-summary');
+  const replies = race.locator('#race-replies');
+  const attempts = race.getByLabel('Race attempts');
+
+  await expect(summary).not.toBeChecked();
+  await expect(replies).not.toBeChecked();
+  await expect(attempts).toBeDisabled();
+
+  await replies.check();
+  await expect.poll(() => settingsPuts.length).toBe(1);
+  expect(settingsPuts[0]).toEqual({ raceReplies: true });
+  await expect(replies).toBeChecked();
+  await expect(summary).not.toBeChecked();
+  await expect(attempts).toBeEnabled();
+
+  await summary.check();
+  await expect.poll(() => settingsPuts.length).toBe(2);
+  expect(settingsPuts[1]).toEqual({ raceSummary: true });
+  await expect(replies).toBeChecked();
+
+  await replies.uncheck();
+  await expect.poll(() => settingsPuts.length).toBe(3);
+  expect(settingsPuts[2]).toEqual({ raceReplies: false });
+  await expect(summary).toBeChecked();
+  await expect(attempts).toBeEnabled();
+
+  await summary.uncheck();
+  await expect.poll(() => settingsPuts.length).toBe(4);
+  await expect(attempts).toBeDisabled();
+});
+
+test('a reply written by a race carries the same badge as a summary', async ({ page }) => {
+  const reply = {
+    ...RACE_SUMMARY,
+    id: 'reply1',
+    isSummary: false,
+    text: 'A reply written by the winning lane.',
+    race: { ...RACE_SUMMARY.race, jobId: 'job_race2', lane: 'nemotron-3-5-lightning-3', model: 'nemotron-3-5-lightning-3', failed: 0, lanes: 3 }
+  };
+  await mockApi(page, { postedComments: [reply] });
+  await openExpandedNews(page);
+
+  const badge = page.getByTestId('race-badge-reply1');
+  await expect(badge).toBeVisible();
+  await expect(badge).toContainText('nemotron-3-5-lightning-3');
+  await expect(badge).toHaveAttribute('title', /Job job_race2/);
+});
+
+test('a summary written by a race shows which lane won it', async ({ page }) => {
+  await mockApi(page, { postedComments: [RACE_SUMMARY] });
+  await openExpandedNews(page);
+
+  const badge = page.getByTestId('race-badge-sum1');
+  await expect(badge).toBeVisible();
+  await expect(badge).toContainText('gpt-4o-mini');
+  await expect(badge).toContainText('5 attempts');
+  await expect(badge).toHaveAttribute(
+    'title',
+    'Won a Nightshift race: 5 attempts (2 failed) on 3 lanes. Winning lane: gpt-4o-mini. Job job_race1.'
+  );
+
+  // An ordinary comment has no badge.
+  await expect(page.locator('[data-testid^="race-badge-"]')).toHaveCount(1);
 });
