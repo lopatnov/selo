@@ -21,6 +21,12 @@
  *       `discuss`    the parallel conversation itself (per-lane pacing/limits);
  *       `summarize`  fan-in: one personality writes the closing summary.
  *
+ *  - `raceSummary` / `raceAttempts` — write the closing summary as a Nightshift
+ *    race instead of one chat call: the runtime runs `raceAttempts` attempts
+ *    across its racing lanes (one lane per model, so Nightshift draws one star
+ *    per lane) and the winning attempt becomes the summary. Off by default; when
+ *    a race fails or takes too long the summary is written the normal way.
+ *
  * The values are stored flat in the JSON state file, so no migration is
  * needed: a state file written before this setting existed simply falls back
  * to the defaults.
@@ -29,12 +35,15 @@
 const DEFAULT_APP_SETTINGS = Object.freeze({
   agentsPerNews: 1,
   parallelLanes: 1,
-  pipeline: Object.freeze({ analyze: true, discuss: true, summarize: false })
+  pipeline: Object.freeze({ analyze: true, discuss: true, summarize: false }),
+  raceSummary: false,
+  raceAttempts: 5
 });
 
 const APP_SETTINGS_LIMITS = Object.freeze({
   agentsPerNews: Object.freeze({ min: 1, max: 5 }),
-  parallelLanes: Object.freeze({ min: 1, max: 5 })
+  parallelLanes: Object.freeze({ min: 1, max: 5 }),
+  raceAttempts: Object.freeze({ min: 2, max: 12 })
 });
 
 function toInteger(value, fallback) {
@@ -98,7 +107,12 @@ function normalizeAppSettings(raw = {}) {
     // actually produce more speaking lanes, not just a higher (unused) cap.
     agentsPerNews: Math.max(agentsPerNews, parallelLanes),
     parallelLanes,
-    pipeline: normalizePipeline(source.pipeline)
+    pipeline: normalizePipeline(source.pipeline),
+    raceSummary: toBoolean(source.raceSummary, DEFAULT_APP_SETTINGS.raceSummary),
+    raceAttempts: clamp(
+      toInteger(source.raceAttempts, DEFAULT_APP_SETTINGS.raceAttempts),
+      APP_SETTINGS_LIMITS.raceAttempts
+    )
   };
 }
 
