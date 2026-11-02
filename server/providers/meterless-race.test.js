@@ -58,7 +58,16 @@ const lane = (name, text, extra = {}) => ({
 test('submits a best-of-n race and returns the winning attempt, with its lane', async () => {
   const runtime = fakeRuntime({
     statuses: ['running', 'running', 'completed'],
-    job: { winner_seq: 3, generated: 4, lane_stats: { 'gpt-4o-mini': {}, 'nemotron-3-5-lightning-3': {}, 'laguna-s-2-1-free': {} } },
+    job: {
+      winner_seq: 3,
+      generated: 4,
+      failed: 1,
+      lane_stats: {
+        'gpt-4o-mini': { attempts: 2, errors: 0 },
+        'nemotron-3-5-lightning-3': { attempts: 1, errors: 0 },
+        'laguna-s-2-1-free': { attempts: 0, errors: 1 }
+      }
+    },
     attempts: { 3: lane('gpt-4o-mini', '  The winning summary.  ') }
   });
   const clock = fakeClock();
@@ -81,7 +90,8 @@ test('submits a best-of-n race and returns the winning attempt, with its lane', 
   assert.equal(result.jobId, 'job_test');
   assert.equal(result.seq, 3);
   assert.equal(result.attempts, 4);
-  assert.equal(result.lanes, 3);
+  assert.equal(result.lanes, 2, 'the lane that only failed is not a star');
+  assert.equal(result.failed, 1);
   assert.equal(result.partial, false);
   assert.equal(runtime.calls.cancel, 0);
 });
@@ -204,7 +214,13 @@ test('describeAttempt and countLanes cope with the shapes the runtime uses', () 
   assert.deepEqual(describeAttempt({ lane: 'only-lane' }), { lane: 'only-lane', model: 'only-lane' });
   assert.deepEqual(describeAttempt(null), { lane: null, model: null });
 
-  assert.equal(countLanes({ lane_stats: { a: {}, b: {} } }), 2);
+  assert.equal(countLanes({ lane_stats: { a: {}, b: {} } }), 2, 'without attempt counts every lane counts');
+  assert.equal(
+    countLanes({ lane_stats: { a: { attempts: 1 }, b: { attempts: 0, errors: 1 }, c: { attempts: 2 } } }),
+    2,
+    'a lane that only failed is left out'
+  );
+  assert.equal(countLanes({ lane_stats: { a: { attempts: 0 } } }), null);
   assert.equal(countLanes({ lane_stats: [{}, {}, {}] }), 3);
   assert.equal(countLanes({}), null);
 });

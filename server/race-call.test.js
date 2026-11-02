@@ -55,6 +55,7 @@ const won = {
   seq: 3,
   attempts: 4,
   lanes: 3,
+  failed: 2,
   partial: false,
   elapsedMs: 12_400
 };
@@ -80,6 +81,7 @@ test('a won race becomes the answer, logged like a chat call, with the winner on
     model: 'gpt-4o-mini-2024',
     attempts: 4,
     lanes: 3,
+    failed: 2,
     partial: false
   });
   assert.equal(seen.fallbackCalls.length, 0, 'no plain call when the race delivered');
@@ -159,7 +161,7 @@ test('pickRace keeps only safe, bounded fields and needs a job id', () => {
   assert.equal(pickRace({ lane: 'x' }), null);
   assert.deepEqual(
     pickRace({ jobId: 'job_1', lane: 'gpt-4o-mini', model: null, attempts: 4, lanes: 0, partial: 'yes', extra: 'dropped' }),
-    { jobId: 'job_1', lane: 'gpt-4o-mini', model: null, attempts: 4, lanes: null, partial: false }
+    { jobId: 'job_1', lane: 'gpt-4o-mini', model: null, attempts: 4, lanes: null, failed: null, partial: false }
   );
   assert.equal(pickRace({ jobId: 'j'.repeat(500) }).jobId.length, 120);
 });

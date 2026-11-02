@@ -73,10 +73,11 @@ function createRaceCaller({
       succeeded = true;
 
       const lanes = won.lanes ? `, ${won.lanes} lanes` : '';
+      const failed = won.failed ? `, ${won.failed} failed` : '';
       const partial = won.partial ? ', partial' : '';
       logger.log(
         `[Meterless] 🏁 ${userName} · won by ${won.lane || won.model || 'a lane'} ` +
-          `(attempt ${won.seq} of ${won.attempts}${lanes}${partial}) in ${Math.round(won.elapsedMs / 1000)} s`
+          `(attempt ${won.seq} of ${won.attempts}${lanes}${failed}${partial}) in ${Math.round(won.elapsedMs / 1000)} s`
       );
 
       return {
@@ -90,6 +91,7 @@ function createRaceCaller({
           model: won.model,
           attempts: won.attempts,
           lanes: won.lanes,
+          failed: won.failed,
           partial: won.partial
         }
       };
@@ -123,6 +125,7 @@ function pickRace(race) {
     model: text(race.model),
     attempts: count(race.attempts),
     lanes: count(race.lanes),
+    failed: count(race.failed),
     partial: race.partial === true
   };
 }

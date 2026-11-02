@@ -66,7 +66,8 @@ function AgentActivityLine({ agents, activity }) {
 /** The hover text of a race badge: what the Nightshift job was and who won it. */
 function describeRace(race) {
   const lanes = race.lanes ? ` on ${race.lanes} lanes` : '';
-  const attempts = race.attempts ? `${race.attempts} attempts` : 'a race';
+  const failed = race.failed ? ` (${race.failed} failed)` : '';
+  const attempts = race.attempts ? `${race.attempts} attempts${failed}` : 'a race';
   const winner = race.model && race.model !== race.lane ? ` (${race.model})` : '';
   const partial = race.partial ? ' The race was cut short; this is the best attempt that had landed.' : '';
   return `Won a Nightshift race: ${attempts}${lanes}. Winning lane: ${race.lane || 'unknown'}${winner}. Job ${race.jobId}.${partial}`;

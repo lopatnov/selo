@@ -530,6 +530,10 @@ So the closing summary can be written as a race. Under the pipeline on the
    personality's own model. A race can only add a summary, never lose one.
 
 The personality's model does not decide the race: the runtime's racing lanes do.
+A lane that only fails still takes an attempt but draws no star: on one machine
+two OpenRouter free models answered `404` (the models were gone), so a 5-attempt
+race showed 3 stars and the badge reads "5 attempts (2 failed) on 3 lanes". Fix a
+dead lane in Nightshift's Lanes panel and the stars come back.
 Racing uses the cloud lanes, so it needs internet and spends tokens on every
 summary (about 10 s for 3 attempts, about 30 s for a whole analysis-plus-race
 discussion in a live check). Check it against your runtime with

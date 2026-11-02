@@ -54,7 +54,7 @@ const RACE_SUMMARY = {
   isAI: true,
   isSummary: true,
   timestamp: '2026-10-27T00:00:08.000Z',
-  race: { jobId: 'job_race1', lane: 'gpt-4o-mini', model: 'gpt-4o-mini', attempts: 5, lanes: 5, partial: false }
+  race: { jobId: 'job_race1', lane: 'gpt-4o-mini', model: 'gpt-4o-mini', attempts: 5, lanes: 3, failed: 2, partial: false }
 };
 
 const LOG_ENTRY = {
@@ -414,7 +414,10 @@ test('a summary written by a race shows which lane won it', async ({ page }) => 
   await expect(badge).toBeVisible();
   await expect(badge).toContainText('gpt-4o-mini');
   await expect(badge).toContainText('5 attempts');
-  await expect(badge).toHaveAttribute('title', /Won a Nightshift race: 5 attempts on 5 lanes. Winning lane: gpt-4o-mini. Job job_race1./);
+  await expect(badge).toHaveAttribute(
+    'title',
+    'Won a Nightshift race: 5 attempts (2 failed) on 3 lanes. Winning lane: gpt-4o-mini. Job job_race1.'
+  );
 
   // An ordinary comment has no badge.
   await expect(page.locator('[data-testid^="race-badge-"]')).toHaveCount(1);

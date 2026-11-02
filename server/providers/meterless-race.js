@@ -48,12 +48,19 @@ function describeAttempt(attempt) {
   return { lane, model: model || lane };
 }
 
-/** How many lanes took part, when the runtime says. */
+/**
+ * How many lanes answered, when the runtime says. A lane that only failed (a
+ * model that is gone answers 404) is a lane that took part but is no star, so
+ * lanes that report attempts are counted; without those numbers, every lane.
+ */
 function countLanes(job) {
   const stats = job?.lane_stats;
   if (Array.isArray(stats)) return stats.length || null;
-  if (stats && typeof stats === 'object') return Object.keys(stats).length || null;
-  return null;
+  if (!stats || typeof stats !== 'object') return null;
+  const lanes = Object.values(stats);
+  const reporting = lanes.filter(lane => Number.isFinite(lane?.attempts));
+  const answered = reporting.length > 0 ? reporting.filter(lane => lane.attempts > 0) : lanes;
+  return answered.length || null;
 }
 
 /** Attempt numbers to try, best first: the winner, the runner-up, then in order. */
@@ -108,7 +115,7 @@ function cancelInBackground(runtime, jobId) {
  *
  * @returns {Promise<{ text: string, lane: string|null, model: string|null,
  *   jobId: string, seq: number, attempts: number, lanes: number|null,
- *   partial: boolean, elapsedMs: number }>}
+ *   failed: number, partial: boolean, elapsedMs: number }>}
  * @throws {ProviderError} race_failed, race_empty or race_timeout (and whatever
  *   the runtime itself refuses with); the caller is expected to fall back.
  */
@@ -174,6 +181,7 @@ async function runRace(
     seq: found.seq,
     attempts: Number.isInteger(job.generated) && job.generated > 0 ? job.generated : attempts,
     lanes: countLanes(job),
+    failed: Number.isInteger(job.failed) && job.failed > 0 ? job.failed : 0,
     partial: timedOut,
     elapsedMs: now() - startedAt
   };
