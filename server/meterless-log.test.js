@@ -138,3 +138,73 @@ test('non-string fields do not break the record', () => {
   assert.equal(entry.answer, '');
   assert.equal(entry.durationMs, null);
 });
+
+test('onChange fires after a push and a clear, so the log can be copied elsewhere', () => {
+  let changes = 0;
+  const log = createMeterlessLog({ limit: 10, onChange: () => (changes += 1) });
+
+  log.push({ newsId: 'n1', ask: 'a' });
+  log.push({ newsId: 'n2', ask: 'b' });
+  assert.equal(changes, 2);
+
+  log.clear({ newsId: 'n1' });
+  assert.equal(changes, 3);
+});
+
+test('a failing onChange hook never breaks logging', () => {
+  const log = createMeterlessLog({
+    limit: 10,
+    onChange: () => {
+      throw new Error('boom');
+    }
+  });
+  const originalError = console.error;
+  console.error = () => {};
+  try {
+    const entry = log.push({ newsId: 'n1', ask: 'a' });
+    assert.equal(entry.ask, 'a');
+    assert.equal(log.size, 1);
+  } finally {
+    console.error = originalError;
+  }
+});
+
+test('snapshot and restore carry the whole log, and restore does not call onChange', () => {
+  let changes = 0;
+  const source = createMeterlessLog({ limit: 5 });
+  source.push({ newsId: 'n1', ask: 'one', think: 't', answer: 'x' });
+  source.push({ newsId: 'n2', ask: 'two', error: 'timeout' });
+  const copy = JSON.parse(JSON.stringify(source.snapshot()));
+
+  const target = createMeterlessLog({ limit: 5, onChange: () => (changes += 1) });
+  target.push({ newsId: 'old', ask: 'old' });
+  changes = 0;
+  target.restore(copy);
+
+  assert.equal(changes, 0);
+  assert.deepEqual(target.list().map(entry => entry.ask), ['two', 'one']);
+  assert.equal(target.list()[0].error, 'timeout');
+  assert.equal(target.sequence >= source.sequence, true);
+
+  // New entries continue the numbering instead of reusing an id.
+  const next = target.push({ newsId: 'n3', ask: 'three' });
+  assert.ok(next.id > Math.max(...copy.entries.map(entry => entry.id)));
+});
+
+test('restore applies the limit and tolerates junk', () => {
+  const log = createMeterlessLog({ limit: 2 });
+  log.restore({
+    sequence: 'nope',
+    entries: [{ id: 3, ask: 'c' }, null, 'junk', { id: 2, ask: 'b' }, { id: 1, ask: 'a' }]
+  });
+  assert.deepEqual(log.list().map(entry => entry.ask), ['c', 'b']);
+
+  log.restore(undefined);
+  assert.equal(log.size, 0);
+});
+
+test('snapshot carries the limit, so a copy knows when the log has dropped entries by itself', () => {
+  const log = createMeterlessLog({ limit: 3 });
+  log.push({ newsId: 'n1', ask: 'a' });
+  assert.equal(log.snapshot().limit, 3);
+});

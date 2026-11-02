@@ -12,6 +12,9 @@ const { meterlessCloud, meterlessRuntime, providers } = require('./providers');
 const { createProvidersRouter } = require('./providers/routes');
 const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
+const { createZetarisStore } = require('./zetaris-store');
+const { createPersistence } = require('./persistence');
+const { adoptRecords } = require('./state-merge');
 const { sanitizeModelText } = require('./meterless-text');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
 const { createMeterlessLog, defaultLogFile } = require('./meterless-log');
@@ -46,21 +49,45 @@ app.get('/health', (req, res) => {
 // AI providers (Meterless Runtime + existing hosted Meterless endpoint)
 app.use('/api/providers', createProvidersRouter({ runtime: meterlessRuntime, providers }));
 
-// Zetaris is the SQL surface of this app. It speaks one documented contract:
-// POST <rest url>/sql-editor/sqls/run with a bearer API key and X-Org-ID.
+// Zetaris is where the app's data lives and its SQL surface. It speaks two
+// documented contracts: POST <rest url>/sql-editor/sqls/run (SQL) and the
+// /ndp-files routes (files), with a bearer API key and X-Org-ID.
 const zetaris = createZetaris();
 
 // This app has no accounts and no login. Everything below is open by design;
 // the single human participant is created lazily on first use.
 //
-// State lives in one JSON file (server/data/state.json, the `server-data`
-// volume in Docker), so RSS sources, AI personalities, news and comments
-// survive a restart. SELO_STATE_FILE overrides the path.
+// RSS sources, AI personalities, news and comments are saved in Zetaris (tables
+// in the `selo` Lightning database, created on first start). The JSON file
+// (server/data/state.json, the `server-data` volume in Docker) is a mirror that
+// keeps the app working while Zetaris is unreachable. SELO_STATE_FILE overrides
+// its path; SELO_STORAGE=local switches Zetaris storage off.
 const stateStore = createStateStore();
+
+function createRemoteStore() {
+  if (String(process.env.SELO_STORAGE || '').trim().toLowerCase() === 'local') return null;
+  if (zetaris.getConfig().authMode === 'none') {
+    console.warn(
+      'Zetaris storage is off: set ZETARIS_API_KEY (or ZETARIS_USERNAME + ZETARIS_PASSWORD) to keep the app data in Zetaris.'
+    );
+    return null;
+  }
+  try {
+    return createZetarisStore({ zetaris });
+  } catch (error) {
+    console.warn(`Zetaris storage is off: ${error.message}`);
+    return null;
+  }
+}
 // ask / think / answer records for every Meterless call, newest first. They are
 // persisted next to the app state, so the **Ask** / **Thinking** toggles under a
 // comment still work after a restart.
-const meterlessLog = createMeterlessLog({ limit: 200, file: defaultLogFile() });
+const meterlessLog = createMeterlessLog({
+  limit: 200,
+  file: defaultLogFile(),
+  // The log is saved in Zetaris with the rest of the app's data.
+  onChange: () => persist()
+});
 // Per-agent request counters, served by `GET /api/activity` for diagnostics.
 const activity = createActivityTracker();
 
@@ -74,34 +101,56 @@ const storage = {
   settings: normalizeAppSettings()
 };
 
-function hydrateStorage() {
-  const saved = stateStore.read();
+const persistence = createPersistence({
+  local: stateStore,
+  remote: createRemoteStore(),
+  snapshot: () => ({
+    participantId: storage.participantId,
+    rssSources: storage.rssSources,
+    users: storage.users,
+    news: storage.news,
+    comments: storage.comments,
+    settings: normalizeAppSettings(storage.settings),
+    meterlessLog: meterlessLog.snapshot()
+  }),
+  // Zetaris answered after a failed start-up and holds records we never loaded:
+  // keep them instead of overwriting them with the first save.
+  adopt: (found, remoteState) => {
+    adoptRecords(storage, found, remoteState);
+    // persistence only gets here with an empty local log: take Zetaris's over,
+    // sequence included, so new entries continue its numbering.
+    if (found.meterlessLog.length > 0) meterlessLog.restore(remoteState.meterlessLog);
+  }
+});
+
+async function hydrateStorage() {
+  const { state: saved, source } = await persistence.hydrate();
   storage.rssSources = saved.rssSources;
   storage.users = saved.users;
   storage.news = saved.news;
   storage.comments = saved.comments;
   storage.participantId = saved.participantId;
   storage.settings = normalizeAppSettings(saved.settings);
-  return saved;
+  // The Zetaris copy of the Meterless log wins, unless it is empty and this
+  // machine's own file still holds records (they are sent to Zetaris instead).
+  if (saved.meterlessLog && (saved.meterlessLog.entries.length > 0 || meterlessLog.size === 0)) {
+    meterlessLog.restore(saved.meterlessLog);
+  } else if (saved.meterlessLog) {
+    persist();
+  }
+  return { ...saved, source };
 }
 
 /**
- * Every mutation funnels through here: one debounced write per burst.
+ * Every mutation funnels through here: one debounced write per burst, to the
+ * local mirror and to Zetaris.
  *
  * `immediate` is used for comments: an AI answer costs a model call and cannot
- * be regenerated, so it must reach the disk before the next (possibly forced)
- * shutdown instead of waiting for the debounce window.
+ * be regenerated, so it must reach the disk (and be sent to Zetaris) before the
+ * next, possibly forced, shutdown instead of waiting for the debounce window.
  */
 function persist({ immediate = false } = {}) {
-  stateStore.write({
-    participantId: storage.participantId,
-    rssSources: storage.rssSources,
-    users: storage.users,
-    news: storage.news,
-    comments: storage.comments,
-    settings: normalizeAppSettings(storage.settings)
-  });
-  if (immediate) stateStore.flush();
+  persistence.schedule({ immediate });
 }
 
 /**
@@ -1645,10 +1694,16 @@ app.post('/api/news/fetch', async (req, res) => {
   res.json({ success: true, sources: results, added: results.reduce((sum, r) => sum + r.added, 0) });
 });
 
-// Zetaris: configuration + honest status
+// Zetaris: configuration + honest status, and where the app's data is saved
 app.get('/api/zetaris', async (req, res) => {
   const status = await zetaris.probe();
-  res.json({ ...zetaris.getConfig(), status });
+  res.json({ ...zetaris.getConfig(), status, storage: persistence.status() });
+});
+
+// Where the app's data lives (Zetaris tables or the local file), and whether the
+// last save reached it.
+app.get('/api/storage', (req, res) => {
+  res.json(persistence.status());
 });
 
 // Zetaris: read-only SQL. Anything that is not a single SELECT/SHOW/DESCRIBE/WITH
@@ -1698,57 +1753,77 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-// Load the saved state before anything can be served.
-const savedState = hydrateStorage();
+const PORT = process.env.PORT || 3001;
 
-// Periodic news fetch (every 10 minutes). Only timers that can do work are kept.
-if (storage.rssSources.length > 0) {
-  setInterval(fetchNewsFromRSS, 10 * 60 * 1000).unref();
-  // Refresh once shortly after boot so a restarted server is not stale.
-  setTimeout(() => {
-    fetchNewsFromRSS().catch(error => console.error('Startup RSS fetch failed:', error.message));
-  }, 3000).unref();
+async function start() {
+  // Load the saved state (from Zetaris when it is configured) before anything
+  // can be served.
+  const savedState = await hydrateStorage();
+
+  // Periodic news fetch (every 10 minutes). Only timers that can do work are kept.
+  if (storage.rssSources.length > 0) {
+    setInterval(fetchNewsFromRSS, 10 * 60 * 1000).unref();
+    // Refresh once shortly after boot so a restarted server is not stale.
+    setTimeout(() => {
+      fetchNewsFromRSS().catch(error => console.error('Startup RSS fetch failed:', error.message));
+    }, 3000).unref();
+  }
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server running on port ${PORT}`);
+    const storageStatus = persistence.status();
+    const where =
+      storageStatus.backend === 'zetaris'
+        ? 'Zetaris ' + storageStatus.database + ', from ' + savedState.source
+        : 'local file';
+    console.log(
+      `State (${where}): ` +
+        `${storage.rssSources.length} RSS source(s) · ` +
+        `${storage.users.length} user(s) · ${storage.news.length} news · ${storage.comments.length} comment(s)` +
+        (savedState.updatedAt ? ` · saved ${savedState.updatedAt}` : ' · new')
+    );
+    console.log(`Local mirror: ${stateStore.filePath}`);
+    if (storageStatus.lastError) console.warn(`Zetaris storage: ${storageStatus.lastError}`);
+    console.log(`WebSocket server ready`);
+
+    const zetarisConfig = zetaris.getConfig();
+    console.log(
+      `Zetaris: ${zetarisConfig.restUrl} · org ${zetarisConfig.orgId} · key ${zetarisConfig.hasKey ? 'set' : 'MISSING'}`
+    );
+    const meterlessConfig = meterlessRuntime.getConfig();
+    console.log(
+      `Meterless Runtime: ${meterlessConfig.baseUrl} · token ${meterlessConfig.hasToken ? meterlessConfig.tokenSource : 'MISSING'}`
+    );
+
+    // Report both providers once at boot so `docker logs` tells the truth.
+    Promise.all([meterlessRuntime.getStatus(), zetaris.probe()])
+      .then(([meterless, zetarisStatus]) => {
+        console.log(`Meterless Runtime status: ${meterless.status}`);
+        console.log(
+          `Zetaris status: ${zetarisStatus.status}${zetarisStatus.reason ? ` (${zetarisStatus.reason})` : ''}`
+        );
+      })
+      .catch(error => console.error('Provider status check failed:', error.message));
+  });
 }
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(
-    `State: ${stateStore.filePath} · ${storage.rssSources.length} RSS source(s) · ` +
-      `${storage.users.length} user(s) · ${storage.news.length} news · ${storage.comments.length} comment(s)` +
-      (savedState.updatedAt ? ` · saved ${savedState.updatedAt}` : ' · new file')
-  );
-  console.log(`WebSocket server ready`);
-
-  const zetarisConfig = zetaris.getConfig();
-  console.log(
-    `Zetaris: ${zetarisConfig.restUrl} · org ${zetarisConfig.orgId} · key ${zetarisConfig.hasKey ? 'set' : 'MISSING'}`
-  );
-  const meterlessConfig = meterlessRuntime.getConfig();
-  console.log(
-    `Meterless Runtime: ${meterlessConfig.baseUrl} · token ${meterlessConfig.hasToken ? meterlessConfig.tokenSource : 'MISSING'}`
-  );
-
-  // Report both providers once at boot so `docker logs` tells the truth.
-  Promise.all([meterlessRuntime.getStatus(), zetaris.probe()])
-    .then(([meterless, zetarisStatus]) => {
-      console.log(`Meterless Runtime status: ${meterless.status}`);
-      console.log(
-        `Zetaris status: ${zetarisStatus.status}${zetarisStatus.reason ? ` (${zetarisStatus.reason})` : ''}`
-      );
-    })
-    .catch(error => console.error('Provider status check failed:', error.message));
+start().catch(error => {
+  console.error('Could not start the server:', error);
+  process.exit(1);
 });
 
 const shutdown = (signal) => {
   console.log(`${signal} received, shutting down`);
-  // Do not lose a debounced write on the way out.
-  stateStore.flush();
   meterlessLog.flush();
   clearInterval(wsHeartbeat);
   wss.close();
-  server.close(() => process.exit(0));
-  setTimeout(() => process.exit(1), 10000).unref();
+  // Do not lose a debounced write on the way out: the local file is written at
+  // once, Zetaris gets a bounded wait.
+  persistence
+    .flush()
+    .catch(error => console.error('Could not save state on shutdown:', error.message))
+    .finally(() => server.close(() => process.exit(0)));
+  setTimeout(() => process.exit(1), 15000).unref();
 };
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));

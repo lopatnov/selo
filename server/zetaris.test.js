@@ -286,3 +286,106 @@ test('tokenExpiryMs reads exp from a JWT and ignores opaque tokens', () => {
   assert.equal(tokenExpiryMs('opaque-token'), null);
   assert.equal(tokenExpiryMs('not-base64.not-json'), null);
 });
+
+test('saveFile posts a multipart form with path and the file, without a JSON content type', async () => {
+  let captured;
+  const client = makeClient({
+    fetchImpl: async (url, init) => {
+      captured = { url, init };
+      return jsonResponse(200, { results: [{ SaveSuccess: { fileName: 'news.csv' } }] });
+    }
+  });
+
+  await client.saveFile('/file-store/selo', 'news.csv', 'id,doc\n"1","{}"\n');
+
+  assert.equal(captured.url, 'http://zetaris.test/api/v1.0/ndp-files/save');
+  assert.equal(captured.init.method, 'POST');
+  assert.equal(captured.init.headers.Authorization, 'Bearer key-123');
+  assert.equal(captured.init.headers['X-Org-ID'], '806');
+  assert.equal(captured.init.headers['Content-Type'], undefined, 'fetch must set the multipart boundary');
+  assert.ok(captured.init.body instanceof FormData);
+  assert.equal(captured.init.body.get('path'), '/file-store/selo');
+  const file = captured.init.body.get('files');
+  assert.equal(file.name, 'news.csv');
+  assert.equal(await file.text(), 'id,doc\n"1","{}"\n');
+});
+
+test('saveFile reports a file Zetaris did not save, and a refused request', async () => {
+  const failed = makeClient({
+    fetchImpl: async () => jsonResponse(200, { results: [{ SaveFailure: { fileName: 'x.csv' } }] })
+  });
+  await assert.rejects(
+    () => failed.saveFile('/file-store/selo', 'x.csv', 'a'),
+    error => error instanceof ZetarisError && error.code === 'write_failed'
+  );
+
+  const refused = makeClient({ fetchImpl: async () => jsonResponse(401, { msg: 'nope' }) });
+  await assert.rejects(
+    () => refused.saveFile('/file-store/selo', 'x.csv', 'a'),
+    error => error instanceof ZetarisError && error.code === 'unauthorized'
+  );
+});
+
+test('listFiles, createDirectory and deleteFiles use the NDP routes', async () => {
+  const calls = [];
+  const client = makeClient({
+    fetchImpl: async (url, init) => {
+      calls.push({ url, method: init.method, body: init.body });
+      if (url.includes('/ndp-files/list')) {
+        return jsonResponse(200, [{ isFile: true, fileName: 'a.csv', type: 'csv', size: 1 }]);
+      }
+      return jsonResponse(200, '');
+    }
+  });
+
+  const entries = await client.listFiles('/file-store/my app');
+  assert.deepEqual(entries.map(entry => entry.fileName), ['a.csv']);
+  assert.equal(calls[0].method, 'GET');
+  assert.equal(calls[0].url, 'http://zetaris.test/api/v1.0/ndp-files/list?path=%2Ffile-store%2Fmy+app');
+
+  await client.createDirectory('/file-store/selo');
+  assert.equal(calls[1].url, 'http://zetaris.test/api/v1.0/ndp-files/createdir');
+  assert.deepEqual(JSON.parse(calls[1].body), { path: '/file-store/selo' });
+
+  await client.deleteFiles(['/file-store/selo/a.csv', '/file-store/selo/b.csv']);
+  assert.equal(calls[2].method, 'DELETE');
+  assert.equal(
+    calls[2].url,
+    'http://zetaris.test/api/v1.0/ndp-files/delete?paths=%2Ffile-store%2Fselo%2Fa.csv&paths=%2Ffile-store%2Fselo%2Fb.csv'
+  );
+
+  await client.deleteFiles(['/file-store/selo'], { recursive: true });
+  assert.match(calls[3].url, /\/ndp-files\/delete\/all\?paths=/);
+});
+
+test('a missing directory surfaces as HTTP 400 with its status, so callers can create it', async () => {
+  const client = makeClient({ fetchImpl: async () => jsonResponse(400, { msg: 'Bad Request' }) });
+  await assert.rejects(
+    () => client.listFiles('/file-store/missing'),
+    error => error instanceof ZetarisError && error.status === 400
+  );
+});
+
+test('file routes get the same single token refresh as SQL', async () => {
+  let logins = 0;
+  let saves = 0;
+  const client = createZetaris({
+    env: { ZETARIS_ORG_ID: '806', ZETARIS_USERNAME: 'u@example.com', ZETARIS_PASSWORD: 'p' },
+    fetchImpl: async url => {
+      if (url.endsWith('/api/auth/login')) {
+        logins += 1;
+        return jsonResponse(200, { idToken: `token-${logins}` });
+      }
+      saves += 1;
+      return saves === 1
+        ? jsonResponse(401, { msg: 'expired' })
+        : jsonResponse(200, { results: [{ SaveSuccess: { fileName: 'a.csv' } }] });
+    },
+    restUrl: 'http://zetaris.test/api/v1.0',
+    uiUrl: 'http://localhost:3000'
+  });
+
+  await client.saveFile('/file-store/selo', 'a.csv', 'x');
+  assert.equal(logins, 2);
+  assert.equal(saves, 2);
+});
