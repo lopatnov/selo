@@ -66,6 +66,23 @@ test('shortenToCompleteSentence keeps whole sentences', () => {
   );
 });
 
+test('shortenToCompleteSentence counts closing quotes, emphasis and repeated stops', () => {
+  assert.equal(
+    shortenToCompleteSentence('He said "stop it now, please, before it all falls apart." Then he left and it was a long story about how'),
+    'He said "stop it now, please, before it all falls apart."'
+  );
+  assert.equal(
+    shortenToCompleteSentence('That is the **whole point of the exercise?!** And then the rest is cut mid'),
+    'That is the **whole point of the exercise?!**'
+  );
+  assert.equal(
+    shortenToCompleteSentence('Wait for it... the deadline moved again and nobody told me. Then the rest of'),
+    'Wait for it... the deadline moved again and nobody told me.'
+  );
+  // A stop inside a word or number is not a sentence end.
+  assert.equal(shortenToCompleteSentence('Version 3.5 shipped and the changelog says the cache is now much fa'), null);
+});
+
 test('shortenToCompleteSentence falls back to the last clause with an ellipsis', () => {
   const shortened = shortenToCompleteSentence(CUT);
   assert.equal(

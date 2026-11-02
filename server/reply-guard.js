@@ -44,7 +44,34 @@ function endsComplete(text) {
   if (!value) return false;
   if (EMOJI_END.test(value)) return true;
   // Markdown emphasis closes after the full stop: "... melted cheddar.*"
-  return SENTENCE_END.test(value.replace(/[*_`]+$/u, ''));
+  return SENTENCE_END.test(value.slice(0, trimmedEnd(value, EMPHASIS)));
+}
+
+const EMPHASIS = new Set(['*', '_', '`']);
+const SENTENCE_STOPS = new Set(['.', '!', '?', '…']);
+const SENTENCE_CLOSERS = new Set(['"', "'", '”', '’', ')', ']', '*', '_', '~']);
+
+/** Length of the text without the trailing characters that are in `chars`. */
+function trimmedEnd(value, chars) {
+  let end = value.length;
+  while (end > 0 && chars.has(value[end - 1])) end -= 1;
+  return end;
+}
+
+/** Index just after the last sentence end (`.`, `!`, `?`, `…`, then closers, then a space), or -1. */
+function lastSentenceEnd(value) {
+  let end = -1;
+  let index = 0;
+  while (index < value.length) {
+    if (!SENTENCE_STOPS.has(value[index])) {
+      index += 1;
+      continue;
+    }
+    while (SENTENCE_STOPS.has(value[index])) index += 1;
+    while (SENTENCE_CLOSERS.has(value[index])) index += 1;
+    if (index === value.length || /\s/u.test(value[index])) end = index;
+  }
+  return end;
 }
 
 /**
@@ -56,9 +83,7 @@ function shortenToCompleteSentence(text, minKept = MIN_KEPT_CHARS) {
   const value = typeof text === 'string' ? text.trim() : '';
   if (!value) return null;
 
-  const sentenceEnd = /[.!?…]+["'”’)\]*_~]*(?=\s|$)/gu;
-  let end = -1;
-  for (const match of value.matchAll(sentenceEnd)) end = match.index + match[0].length;
+  const end = lastSentenceEnd(value);
   if (end >= minKept) return value.slice(0, end).trim();
 
   const clauseBreak = /[,;:]\s|\s[—–-]\s/gu;

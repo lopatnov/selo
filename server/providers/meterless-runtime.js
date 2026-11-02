@@ -94,6 +94,22 @@ function splitModelIds(ids) {
   return { routingModes, otherModels };
 }
 
+function firstString(...values) {
+  return values.find(value => typeof value === 'string') ?? '';
+}
+
+/**
+ * The completion tokens of a reply and whether they reached the cap. The runtime
+ * reports `finish_reason: "stop"` even when the cap cut the reply, so the token
+ * count is the only sign of a cut.
+ */
+function tokenUse(data, maxTokens) {
+  const used = data?.usage?.completion_tokens;
+  const completionTokens = Number.isFinite(used) ? used : null;
+  const truncated = completionTokens !== null && Number.isFinite(maxTokens) && completionTokens >= maxTokens;
+  return { completionTokens, truncated };
+}
+
 /**
  * Map a raw class state to a stable { state, label } pair the UI can render.
  * The runtime's vocabulary is wider than the four buckets the contract keeps:
@@ -591,30 +607,12 @@ function createMeterlessRuntime(options = {}) {
       throw new ProviderError('invalid_response', 'Meterless Runtime returned no text content.');
     }
 
-    const reasoning =
-      typeof message?.reasoning_content === 'string'
-        ? message.reasoning_content
-        : typeof message?.reasoning === 'string'
-          ? message.reasoning
-          : typeof choice?.reasoning_content === 'string'
-            ? choice.reasoning_content
-            : '';
-
-    // The runtime reports `finish_reason: "stop"` even when the cap cut the
-    // reply, so the only sign of a cut is the token count reaching the cap.
-    const completionTokens = Number.isFinite(data?.usage?.completion_tokens)
-      ? data.usage.completion_tokens
-      : null;
-    const cap = Number.isFinite(body.max_tokens) ? body.max_tokens : null;
-    const truncated = completionTokens !== null && cap !== null && completionTokens >= cap;
-
     return {
       content,
-      reasoning,
+      reasoning: firstString(message?.reasoning_content, message?.reasoning, choice?.reasoning_content),
       model,
       durationMs: Date.now() - startedAt,
-      completionTokens,
-      truncated
+      ...tokenUse(data, body.max_tokens)
     };
   }
 
