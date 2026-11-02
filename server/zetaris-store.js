@@ -36,9 +36,17 @@ const DEFAULT_DATABASE = 'selo';
 const FILE_STORE = '/file-store';
 const READ_LIMIT = 100_000;
 const DESCRIPTION = 'AI news discussion app data';
-const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_]{0,62}$/;
+const IDENTIFIER = /^[A-Za-z]\w{0,62}$/;
 
 const text = value => (value === undefined ? null : value);
+
+/**
+ * Run `task` for each item, one after the other. Zetaris is given one upload or
+ * one DDL statement at a time, in order.
+ */
+function inOrder(items, task) {
+  return items.reduce((chain, item) => chain.then(() => task(item)), Promise.resolve());
+}
 
 /**
  * `columns` are the queryable projection of a record (`project` returns them in
@@ -124,7 +132,7 @@ function fileColumns(table) {
  */
 function csvField(value) {
   if (value === null || value === undefined) return '';
-  return `"${String(value).replace(/"/g, '""')}"`;
+  return `"${String(value).replaceAll('"', '""')}"`;
 }
 
 function csvLine(values) {
@@ -156,8 +164,9 @@ function stateCsv(state, savedAt, logSequence = 0) {
   return out;
 }
 
+/** Only tells "same content as last upload" from "changed"; not a security hash. */
 function digest(content) {
-  return createHash('sha1').update(content).digest('hex');
+  return createHash('sha256').update(content).digest('hex');
 }
 
 function resolveDatabase(env = process.env) {
@@ -188,11 +197,7 @@ function createZetarisStore({ zetaris, database = resolveDatabase(), now = () =>
   }
 
   function createTableSql(table) {
-    return (
-      `CREATE LIGHTNING FILESTORE TABLE ${table.name} FROM ${database} FORMAT CSV OPTIONS (` +
-      `path "dffs://${database}/${table.name}.csv", header "true", multiLine "true", ` +
-      `quote "\\"", escape "\\"")`
-    );
+    return String.raw`CREATE LIGHTNING FILESTORE TABLE ${table.name} FROM ${database} FORMAT CSV OPTIONS (path "dffs://${database}/${table.name}.csv", header "true", multiLine "true", quote "\"", escape "\"")`;
   }
 
   async function ensureSchema() {
@@ -220,7 +225,7 @@ function createZetarisStore({ zetaris, database = resolveDatabase(), now = () =>
     );
 
     const created = [];
-    for (const table of tables) {
+    await inOrder(tables, async table => {
       const file = `${table.name}.csv`;
       // Only an absent file is created: stored data is never overwritten here.
       if (!files.has(file)) {
@@ -230,7 +235,7 @@ function createZetarisStore({ zetaris, database = resolveDatabase(), now = () =>
         await zetaris.runSql(createTableSql(table));
         created.push(table.name);
       }
-    }
+    });
 
     await Promise.all(tables.map(table => verifyColumns(table)));
     return { database, directory, created };
@@ -249,11 +254,11 @@ function createZetarisStore({ zetaris, database = resolveDatabase(), now = () =>
         .catch(() => {});
       try {
         await zetaris.runSql(sql, { limit: 1 });
-      } catch (retry) {
+      } catch (error_) {
         throw new Error(
           `Zetaris table ${database}.${table.name} does not have the columns this app expects ` +
             `(${fileColumns(table).join(', ')}). Drop it ("DROP LIGHTNING DATABASE TABLE ${database}.${table.name}") ` +
-            `or set ZETARIS_APP_DATABASE to another name. ${retry.message}`
+            `or set ZETARIS_APP_DATABASE to another name. ${error_.message}`
         );
       }
     }
@@ -353,14 +358,14 @@ function createZetarisStore({ zetaris, database = resolveDatabase(), now = () =>
 
       const sent = [];
       let bytes = 0;
-      for (const file of files) {
+      await inOrder(files, async file => {
         const hash = digest(file.content);
-        if (uploaded.get(file.name) === hash) continue;
+        if (uploaded.get(file.name) === hash) return;
         await zetaris.saveFile(directory, file.name, file.content);
         uploaded.set(file.name, hash);
         sent.push(file.name);
         bytes += Buffer.byteLength(file.content);
-      }
+      });
 
       return {
         savedAt,

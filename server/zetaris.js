@@ -52,6 +52,18 @@ class ZetarisError extends Error {
   }
 }
 
+const isRefusal = status => status === 401 || status === 403;
+
+function parseJson(text, what) {
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    throw new ZetarisError('invalid_response', `Zetaris answered with invalid JSON (${what}).`, {
+      cause: error
+    });
+  }
+}
+
 function clean(value) {
   return String(value == null ? '' : value).trim();
 }
@@ -298,7 +310,8 @@ function createZetaris(options = {}) {
    * failure is reported. Resolves with the response body text.
    */
   async function call(path, { method = 'GET', body, search, timeoutMs = QUERY_TIMEOUT_MS } = {}) {
-    const url = `${baseUrl()}${path}${search ? `?${search}` : ''}`;
+    const query = search ? `?${search}` : '';
+    const url = `${baseUrl()}${path}${query}`;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       // A missing key/credentials or a non-numeric org id is a configuration
@@ -323,36 +336,13 @@ function createZetaris(options = {}) {
       const text = await response.text().catch(() => '');
 
       // A cached login token can expire mid-flight: drop it and retry once.
-      if (
-        (response.status === 401 || response.status === 403) &&
-        credentials.source === 'login' &&
-        attempt === 0
-      ) {
+      if (isRefusal(response.status) && credentials.source === 'login' && attempt === 0) {
         loginToken = null;
         continue;
       }
 
-      if (response.status === 401 || response.status === 403) {
-        throw new ZetarisError('unauthorized', 'Zetaris refused the bearer token.', {
-          status: response.status
-        });
-      }
-      // "Not Allowed" is what Zetaris returns when the key is valid but the
-      // X-Org-ID is not the numeric id that owns it.
-      if (response.status === 400 && /not allowed/i.test(text)) {
-        throw new ZetarisError(
-          'unauthorized',
-          `Zetaris refused the token for X-Org-ID ${orgId()}. Use the numeric organisation id that owns ZETARIS_API_KEY / ZETARIS_USERNAME.`,
-          { status: response.status }
-        );
-      }
-      if (!response.ok) {
-        throw new ZetarisError(
-          'offline',
-          `Zetaris answered HTTP ${response.status}: ${text.slice(0, 200)}`,
-          { status: response.status }
-        );
-      }
+      const failure = failureFor(response, text);
+      if (failure) throw failure;
 
       return { status: response.status, text };
     }
@@ -361,14 +351,29 @@ function createZetaris(options = {}) {
     throw new ZetarisError('unauthorized', 'Zetaris refused the bearer token.');
   }
 
-  function parseJson(text, what) {
-    try {
-      return JSON.parse(text);
-    } catch (error) {
-      throw new ZetarisError('invalid_response', `Zetaris answered with invalid JSON (${what}).`, {
-        cause: error
-      });
+  /** The error a non-success answer stands for, or `null` when it is a success. */
+  function failureFor(response, text) {
+    const { status } = response;
+    if (isRefusal(status)) {
+      return new ZetarisError('unauthorized', 'Zetaris refused the bearer token.', { status });
     }
+    // "Not Allowed" is what Zetaris returns when the key is valid but the
+    // X-Org-ID is not the numeric id that owns it.
+    if (status === 400 && /not allowed/i.test(text)) {
+      return new ZetarisError(
+        'unauthorized',
+        `Zetaris refused the token for X-Org-ID ${orgId()}. Use the numeric organisation id that owns ZETARIS_API_KEY / ZETARIS_USERNAME.`,
+        { status }
+      );
+    }
+    if (!response.ok) {
+      return new ZetarisError(
+        'offline',
+        `Zetaris answered HTTP ${status}: ${text.slice(0, 200)}`,
+        { status }
+      );
+    }
+    return null;
   }
 
   async function runSql(sql, { limit = DEFAULT_LIMIT } = {}) {

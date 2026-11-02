@@ -1763,8 +1763,12 @@ async function start() {
   server.listen(PORT, '0.0.0.0', () => {
     console.log(`Server running on port ${PORT}`);
     const storageStatus = persistence.status();
+    const where =
+      storageStatus.backend === 'zetaris'
+        ? 'Zetaris ' + storageStatus.database + ', from ' + savedState.source
+        : 'local file';
     console.log(
-      `State (${storageStatus.backend === 'zetaris' ? `Zetaris ${storageStatus.database}, from ${savedState.source}` : 'local file'}): ` +
+      `State (${where}): ` +
         `${storage.rssSources.length} RSS source(s) · ` +
         `${storage.users.length} user(s) · ${storage.news.length} news · ${storage.comments.length} comment(s)` +
         (savedState.updatedAt ? ` · saved ${savedState.updatedAt}` : ' · new')

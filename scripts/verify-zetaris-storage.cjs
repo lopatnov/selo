@@ -116,9 +116,13 @@ const step = name => console.log(`\n== ${name}`);
 const ok = message => console.log(`PASS ${message}`);
 
 async function cleanup() {
-  for (const table of ALL_TABLE_NAMES) {
-    await zetaris.runSql(`DROP LIGHTNING DATABASE TABLE ${database}.${table}`).catch(() => {});
-  }
+  await ALL_TABLE_NAMES.reduce(
+    (chain, table) =>
+      chain.then(() =>
+        zetaris.runSql(`DROP LIGHTNING DATABASE TABLE ${database}.${table}`).catch(() => {})
+      ),
+    Promise.resolve()
+  );
   await zetaris.runSql(`DROP LIGHTNING DATABASE ${database}`).catch(() => {});
   await zetaris.deleteFiles([store.directory], { recursive: true }).catch(() => {});
 }
@@ -129,7 +133,8 @@ async function cleanup() {
 
   step('1. schema');
   const first = await store.ensureSchema();
-  assert.deepEqual(first.created.sort(), ALL_TABLE_NAMES.slice().sort());
+  const byName = (a, b) => a.localeCompare(b);
+  assert.deepEqual(first.created.toSorted(byName), ALL_TABLE_NAMES.toSorted(byName));
   ok(`created ${first.created.length} tables in ${first.directory}`);
   const second = await store.ensureSchema();
   assert.deepEqual(second.created, []);
@@ -188,7 +193,7 @@ async function cleanup() {
 })()
   .catch(error => {
     failed = true;
-    console.error(`\nFAIL ${error && error.stack ? error.stack : error}`);
+    console.error(`\nFAIL ${error?.stack ?? error}`);
   })
   .finally(async () => {
     if (KEEP) {

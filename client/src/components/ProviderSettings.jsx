@@ -58,6 +58,16 @@ function StatusBadge({ status, testId }) {
   );
 }
 
+/** One line about where the app data is saved, for the Zetaris card. */
+function describeStorage(storage) {
+  if (storage == null) return '…';
+  if (storage.backend !== 'zetaris') return 'Local file only (Zetaris storage is off)';
+  const saved = storage.lastSavedAt
+    ? ` · saved ${new Date(storage.lastSavedAt).toLocaleTimeString()}`
+    : '';
+  return `Zetaris · database ${storage.database} · ${storage.health}${saved}`;
+}
+
 function ProviderSettings() {
   const [config, setConfig] = useState(null);
   const [status, setStatus] = useState({ status: 'checking' });
@@ -332,13 +342,7 @@ function ProviderSettings() {
   // log) is saved: tables in a Zetaris Lightning database, or a local file.
   const storage = zetaris?.storage;
   const storageDb = storage?.database || 'selo';
-  const storageSummary =
-    storage == null
-      ? '…'
-      : storage.backend === 'zetaris'
-        ? `Zetaris · database ${storage.database} · ${storage.health}` +
-          (storage.lastSavedAt ? ` · saved ${new Date(storage.lastSavedAt).toLocaleTimeString()}` : '')
-        : 'Local file only (Zetaris storage is off)';
+  const storageSummary = describeStorage(storage);
   const exampleQueries =
     storage?.backend === 'zetaris'
       ? [

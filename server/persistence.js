@@ -36,6 +36,11 @@ function hasData(state) {
   );
 }
 
+function unref(handle) {
+  if (handle && typeof handle.unref === 'function') handle.unref();
+  return handle;
+}
+
 function time(value) {
   const parsed = Date.parse(value || '');
   return Number.isNaN(parsed) ? 0 : parsed;
@@ -65,13 +70,8 @@ function createPersistence({
   let lastError = null;
   let lastLogged = null;
 
-  function unref(handle) {
-    if (handle && typeof handle.unref === 'function') handle.unref();
-    return handle;
-  }
-
   function fail(error) {
-    lastError = error && error.message ? error.message : String(error);
+    lastError = error?.message ?? String(error);
     dirty = true;
     if (lastLogged !== lastError) {
       logger.warn(`Zetaris storage: ${lastError} - the local file keeps the data and the save is retried.`);
