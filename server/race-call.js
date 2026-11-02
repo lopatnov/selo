@@ -72,10 +72,11 @@ function createRaceCaller({
       });
       succeeded = true;
 
+      const lanes = won.lanes ? `, ${won.lanes} lanes` : '';
+      const partial = won.partial ? ', partial' : '';
       logger.log(
         `[Meterless] 🏁 ${userName} · won by ${won.lane || won.model || 'a lane'} ` +
-          `(attempt ${won.seq} of ${won.attempts}${won.lanes ? `, ${won.lanes} lanes` : ''}` +
-          `${won.partial ? ', partial' : ''}) in ${Math.round(won.elapsedMs / 1000)} s`
+          `(attempt ${won.seq} of ${won.attempts}${lanes}${partial}) in ${Math.round(won.elapsedMs / 1000)} s`
       );
 
       return {

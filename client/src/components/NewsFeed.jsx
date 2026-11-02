@@ -72,6 +72,22 @@ function describeRace(race) {
   return `Won a Nightshift race: ${attempts}${lanes}. Winning lane: ${race.lane || 'unknown'}${winner}. Job ${race.jobId}.${partial}`;
 }
 
+/** The badge on a summary that a Nightshift race wrote; nothing for any other comment. */
+function RaceBadge({ race, commentId }) {
+  if (!race) return null;
+  const attempts = race.attempts ? ` · ${race.attempts} attempts` : '';
+  return (
+    <span
+      className="comment-badge race"
+      data-testid={`race-badge-${commentId}`}
+      title={describeRace(race)}
+    >
+      🏁 {race.lane || 'race'}
+      {attempts}
+    </span>
+  );
+}
+
 const PHASES = {
   analyze: { label: 'Analysis', emoji: '🔍' },
   discuss: { label: 'Discussion', emoji: '💬' },
@@ -618,16 +634,7 @@ function NewsFeed() {
                               >
                                 {comment.isSummary ? '🧾 Summary' : comment.isAI ? 'AI' : 'User'}
                               </span>
-                              {comment.race && (
-                                <span
-                                  className="comment-badge race"
-                                  data-testid={`race-badge-${comment.id}`}
-                                  title={describeRace(comment.race)}
-                                >
-                                  🏁 {comment.race.lane || 'race'}
-                                  {comment.race.attempts ? ` · ${comment.race.attempts} attempts` : ''}
-                                </span>
-                              )}
+                              <RaceBadge race={comment.race} commentId={comment.id} />
                               <span className="comment-time">
                                 {formatDate(comment.timestamp)}
                               </span>
