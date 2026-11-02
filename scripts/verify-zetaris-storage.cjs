@@ -45,7 +45,7 @@ const NASTY = [
 ];
 
 // A feed name with an apostrophe, double quotes and a backslash: the "news from this feed" query must cope.
-const ODD_FEED = 'O\'Reilly "Radar" \\ feed';
+const ODD_FEED = String.raw`O'Reilly "Radar" \ feed`;
 
 function buildState(commentCount) {
   const user = {
@@ -214,21 +214,28 @@ async function cleanup() {
     require('node:fs').readFileSync(require('node:path').join(__dirname, '..', 'client', 'src', 'zetarisExamples.json'), 'utf8')
   );
   const examples = groups.flatMap(group => group.queries);
-  for (const example of examples) {
-    const result = await zetaris.runSql(example.sql.replaceAll('{db}', database), { limit: 25 });
-    assert.ok(result.rows.length > 0, `${example.id} returned no rows`);
-  }
+  await Promise.all(
+    examples.map(async example => {
+      const result = await zetaris.runSql(example.sql.replaceAll('{db}', database), { limit: 25 });
+      assert.ok(result.rows.length > 0, `${example.id} returned no rows`);
+    })
+  );
   ok(`all ${examples.length} example queries run and return rows`);
 
   // "News from this feed": one query per feed, the feed name as an escaped SQL string
   // (the same escaping as the page: backslash and single quote).
-  const literal = value => `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
-  for (const source of state.rssSources) {
-    const sql = feedQuery.sql.replaceAll('{db}', database).replace('{name}', () => literal(source.name));
-    const result = await zetaris.runSql(sql, { limit: 25 });
-    const expected = state.news.filter(item => item.sourceName === source.name).length;
-    assert.equal(result.rows.length, Math.min(expected, 20), `news from "${source.name}"`);
-  }
+  const literal = value => {
+    const escaped = String(value).replaceAll(/\\/g, String.raw`\\`).replaceAll("'", String.raw`\'`);
+    return `'${escaped}'`;
+  };
+  await Promise.all(
+    state.rssSources.map(async source => {
+      const sql = feedQuery.sql.replaceAll('{db}', database).replace('{name}', () => literal(source.name));
+      const result = await zetaris.runSql(sql, { limit: 25 });
+      const expected = state.news.filter(item => item.sourceName === source.name).length;
+      assert.equal(result.rows.length, Math.min(expected, 20), `news from "${source.name}"`);
+    })
+  );
   ok(`news from each of the ${state.rssSources.length} feeds, including one named with quotes and a backslash`);
 })()
   .catch(error => {

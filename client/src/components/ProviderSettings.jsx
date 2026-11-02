@@ -61,7 +61,10 @@ function StatusBadge({ status, testId }) {
 
 /** A value as a Spark SQL string literal: backslash and single quote are escaped. */
 function sqlString(value) {
-  return `'${String(value).replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`;
+  const escaped = String(value)
+    .replaceAll(/\\/g, String.raw`\\`)
+    .replaceAll("'", String.raw`\'`);
+  return `'${escaped}'`;
 }
 
 /** The example groups for database `db`, plus a group with one query per feed. */
@@ -238,7 +241,7 @@ function ProviderSettings() {
   const loadZetaris = useCallback(async () => {
     setZetarisBusy('status');
     setZetarisError('');
-    loadFeeds();
+    void loadFeeds();
     try {
       const { data } = await axios.get(`${API_BASE}/zetaris`);
       setZetaris(data);
@@ -376,7 +379,7 @@ function ProviderSettings() {
     const sql = event.target.value;
     if (!sql) return;
     setZetarisSql(sql);
-    runZetarisQuery(sql);
+    return runZetarisQuery(sql);
   };
 
   const statusKind = status?.status || 'checking';
