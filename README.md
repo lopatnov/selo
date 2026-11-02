@@ -141,9 +141,10 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
   model calls across all active discussions. The feed renders the current phase
   and a live lane strip (role + 👀/✅/❌ per lane), and the closing summary is
   styled as its own comment kind.
-- **🏁 Race the summary (many Nightshift lanes).** Off by default; switch it on
-  under the pipeline on the **Users** page. The closing summary is then written
-  as a Nightshift race instead of one chat call - see
+- **🏁 Race in Nightshift (many lanes).** Off by default; two switches under the
+  pipeline on the **Users** page: the closing **summary**, and/or **every reply**
+  (openings included). A message is then written as a Nightshift race instead of
+  one chat call - see
   [Why Nightshift shows one lane](#why-nightshift-shows-one-lane-and-how-a-race-fixes-it).
 - **Every configured model id is sent to the runtime as-is.** The runtime is
   what routes an id: a routing mode (`meterless/auto`), a catalogue id
@@ -212,7 +213,7 @@ There is no auth header anywhere; every route below is open by design.
 | `GET`          | `/api/news`                                      | News items, newest first                                                                                    |
 | `GET`          | `/api/news/:id`                                  | One item with comments, `discussionActive`, its agents and skipped ones                                     |
 | `GET`          | `/api/activity`                                  | Per agent + model: in-flight, completed, failed requests                                                    |
-| `GET` / `PUT`  | `/api/settings`                                  | Global discussion settings (`agentsPerNews` 1–5, `parallelLanes` 1–5, `pipeline.analyze/discuss/summarize`, `raceSummary`, `raceAttempts` 2–12) |
+| `GET` / `PUT`  | `/api/settings`                                  | Global discussion settings (`agentsPerNews` 1–5, `parallelLanes` 1–5, `pipeline.analyze/discuss/summarize`, `raceSummary`, `raceReplies`, `raceAttempts` 2–12) |
 | `GET` / `POST` | `/api/users`                                     | List / create personalities (including discussion settings)                                                 |
 | `PUT`          | `/api/users/:id`                                 | Edit a personality and its discussion settings                                                              |
 | `DELETE`       | `/api/users/:id`                                 | Delete a personality                                                                                        |
@@ -512,22 +513,34 @@ by asking for other models:
   model: gpt-4o-mini, the nemotron lanes, laguna, qwen3 …) and the attempts that
   land are the stars.
 
-So the closing summary can be written as a race. Under the pipeline on the
-**Users** page switch on **🏁 Race the summary** and pick the number of attempts
-(2–12, default 5, about the number of racing lanes):
+So a message can be written as a race. Under the pipeline on the **Users** page
+switch on **🏁 Race in Nightshift**: **Summary** races the closing summary,
+**Every reply** races every opening and reply of the AI personalities. Pick the
+number of attempts (2–12, default 5, about the number of racing lanes):
 
-1. The summary prompt is submitted to the runtime as `POST /v1/jobs`
+1. The prompt is submitted to the runtime as `POST /v1/jobs`
    (`kind: best_of_n`, `n`, `window: now`, `app: ai-news-discussion`).
 2. The app polls `GET /v1/jobs/{id}` until the job is final, up to **150 s**, then
    reads the winning attempt (`winner_seq`, else the first attempt that has an
    answer) from `GET /v1/jobs/{id}/attempts/{seq}`. A race that outlives the
    deadline is cancelled and the best attempt that had landed is used.
-3. The winner is posted as the summary. It carries a **🏁 lane · N attempts**
+3. The winner is posted as the message. It carries a **🏁 lane · N attempts**
    badge (hover for the job id and the lane count), and its Ask/Thinking log
-   entry reads `race ×5 → gpt-4o-mini`.
+   entry reads `race ×5 → gpt-4o-mini`. In Nightshift's job list the race is
+   named by its stage: `Summary · <article>`, `Opening · <personality> · <article>`
+   or `Reply · <personality> · <article>`.
 4. **If the race cannot give an answer** (the runtime refuses it, it times out, no
-   attempt has text) the summary is written the normal way, with the
-   personality's own model. A race can only add a summary, never lose one.
+   attempt has text) the message is written the normal way, with the
+   personality's own model. A race can only add a message, never lose one.
+
+**Racing every reply is a different trade from racing the summary.** A summary is
+one message per discussion; replies are dozens (five agents with 20 messages each
+is up to 100 races of 5 attempts, about 500 model calls per article). A race also
+replaces the personality's own model with the runtime's lanes, takes about
+10–30 s, and starts one Nightshift job per message. At most two races run at a
+time (`SELO_MAX_CONCURRENT_RACES`, default 2); the other turns wait. Lower the
+attempts, or keep the replies on plain chat and race only the summary, if that is
+too much.
 
 The personality's model does not decide the race: the runtime's racing lanes do.
 A lane that only fails still takes an attempt but draws no star: on one machine

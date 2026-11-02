@@ -14,7 +14,7 @@ const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { createZetarisStore } = require('./zetaris-store');
 const { createPersistence } = require('./persistence');
-const { createRaceCaller, pickRace } = require('./race-call');
+const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
 const { sanitizeModelText } = require('./meterless-text');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
@@ -463,6 +463,26 @@ const callMeterlessRace = createRaceCaller({
   sanitize: sanitizeModelText
 });
 
+// One AI call for a pipeline stage. Where the settings ask for a race (the summary
+// with raceSummary; the openings and replies with raceReplies) it is a Nightshift
+// race, a few at a time; every other call, and every race that cannot answer, is
+// the ordinary chat call. The result is the same either way, plus `race`.
+async function callForStage(stage, call, news) {
+  const settings = currentSettings();
+  if (!shouldRace(settings, stage)) return callMeterlessAI(call);
+
+  await raceSlots.acquire();
+  try {
+    return await callMeterlessRace({
+      ...call,
+      attempts: settings.raceAttempts,
+      title: raceTitle(stage, call.user, news)
+    });
+  } finally {
+    raceSlots.release();
+  }
+}
+
 // Broadcast to WebSocket clients
 function broadcast(type, data) {
   const message = JSON.stringify({ type, data });
@@ -587,6 +607,11 @@ function createSemaphore(limit) {
 }
 
 const turnSlots = createSemaphore(DEFAULT_MAX_CONCURRENT_TURNS);
+
+// A race occupies several of the runtime's lanes at once, so only a few run at a
+// time and the other turns wait for their turn (SELO_MAX_CONCURRENT_RACES).
+const DEFAULT_MAX_CONCURRENT_RACES = Number.parseInt(process.env.SELO_MAX_CONCURRENT_RACES, 10) || 2;
+const raceSlots = createSemaphore(DEFAULT_MAX_CONCURRENT_RACES);
 
 // AI users only: the local human participant (isAI: false, modelName: "human")
 // never posts AI replies.
@@ -1018,7 +1043,7 @@ async function runAnalysisLane(newsId, news, user, cooldowns, apologized, failur
   broadcastAgentActivity(newsId, user, 'requesting', { laneRole: LANE_ROLES.ANALYST });
 
   const result = await withTurnSlot(laneSlots, () =>
-    callMeterlessAI({ newsId, user, prompt: prompt.user, systemPrompt: prompt.system })
+    callForStage('analyze', { newsId, user, prompt: prompt.user, systemPrompt: prompt.system }, news)
   );
   if (!isDiscussionActive(newsId)) return;
 
@@ -1027,7 +1052,8 @@ async function runAnalysisLane(newsId, news, user, cooldowns, apologized, failur
     apologized.delete(user.id);
     failuresByUser.delete(user.id);
     const comment = await addComment(newsId, user.id, result.answer, true, {
-      logEntryId: result.entry?.id ?? null
+      logEntryId: result.entry?.id ?? null,
+      race: result.race
     });
     broadcastAgentActivity(newsId, user, 'success', {
       laneRole: LANE_ROLES.ANALYST,
@@ -1077,7 +1103,7 @@ async function runDebateLane(newsId, news, user, cooldowns, apologized, failures
     // Build the prompt inside the slot so the lane sees the freshest thread.
     const result = await withTurnSlot(laneSlots, () => {
       const prompt = buildDiscussionPrompt(news, user, commentThread(newsId));
-      return callMeterlessAI({ newsId, user, prompt: prompt.user, systemPrompt: prompt.system });
+      return callForStage('discuss', { newsId, user, prompt: prompt.user, systemPrompt: prompt.system }, news);
     });
     if (!isDiscussionActive(newsId)) return;
 
@@ -1086,7 +1112,8 @@ async function runDebateLane(newsId, news, user, cooldowns, apologized, failures
       apologized.delete(user.id);
       failuresByUser.delete(user.id);
       const comment = await addComment(newsId, user.id, result.answer, true, {
-        logEntryId: result.entry?.id ?? null
+        logEntryId: result.entry?.id ?? null,
+        race: result.race
       });
       broadcastAgentActivity(newsId, user, 'success', {
         laneRole: LANE_ROLES.DEBATER,
@@ -1110,8 +1137,6 @@ async function runSummaryLane(newsId, news, summarizer) {
   const prompt = buildSummaryPrompt(news, summarizer, commentThread(newsId));
   broadcastAgentActivity(newsId, summarizer, 'requesting', { laneRole: LANE_ROLES.SUMMARIZER });
 
-  const settings = currentSettings();
-
   await turnSlots.acquire();
   let result;
   try {
@@ -1122,15 +1147,8 @@ async function runSummaryLane(newsId, news, summarizer) {
       prompt: prompt.user,
       systemPrompt: prompt.system
     };
-    // The summary is the one answer worth a race: it closes the discussion, and
-    // a race shows Nightshift's lanes. Off by default (Users page).
-    result = settings.raceSummary
-      ? await callMeterlessRace({
-          ...call,
-          attempts: settings.raceAttempts,
-          title: `Summary · ${String(news?.title || 'news item').slice(0, 80)}`
-        })
-      : await callMeterlessAI(call);
+    // A race when the settings ask for one (Users page), else one chat call.
+    result = await callForStage('summarize', call, news);
   } finally {
     turnSlots.release();
   }

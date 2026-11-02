@@ -109,6 +109,21 @@ function createRaceCaller({
   };
 }
 
+/** Does the setting ask for a race at this pipeline stage? */
+function shouldRace(settings, stage) {
+  if (stage === 'summarize') return settings?.raceSummary === true;
+  if (stage === 'analyze' || stage === 'discuss') return settings?.raceReplies === true;
+  return false;
+}
+
+const STAGE_TITLES = { analyze: 'Opening', discuss: 'Reply', summarize: 'Summary' };
+
+/** The name the race has in Nightshift's job list: stage, personality, article. */
+function raceTitle(stage, user, news) {
+  const who = stage === 'summarize' ? '' : ` · ${String(user?.name || 'AI').slice(0, 30)}`;
+  return `${STAGE_TITLES[stage] || 'Reply'}${who} · ${String(news?.title || 'news item').slice(0, 70)}`;
+}
+
 /**
  * The part of a race result that is kept on a comment: strings and numbers
  * only, whatever the runtime sent.
@@ -130,4 +145,4 @@ function pickRace(race) {
   };
 }
 
-module.exports = { createRaceCaller, pickRace };
+module.exports = { createRaceCaller, pickRace, raceTitle, shouldRace };

@@ -3,7 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { createRaceCaller, pickRace } = require('./race-call');
+const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 
 const quiet = { log() {}, warn() {}, error() {} };
 
@@ -164,4 +164,31 @@ test('pickRace keeps only safe, bounded fields and needs a job id', () => {
     { jobId: 'job_1', lane: 'gpt-4o-mini', model: null, attempts: 4, lanes: null, failed: null, partial: false }
   );
   assert.equal(pickRace({ jobId: 'j'.repeat(500) }).jobId.length, 120);
+});
+
+test('shouldRace follows the settings: the summary and the replies are separate switches', () => {
+  const off = { raceSummary: false, raceReplies: false };
+  for (const stage of ['analyze', 'discuss', 'summarize']) assert.equal(shouldRace(off, stage), false, stage);
+
+  const summaryOnly = { raceSummary: true, raceReplies: false };
+  assert.equal(shouldRace(summaryOnly, 'summarize'), true);
+  assert.equal(shouldRace(summaryOnly, 'analyze'), false);
+  assert.equal(shouldRace(summaryOnly, 'discuss'), false);
+
+  const repliesOnly = { raceSummary: false, raceReplies: true };
+  assert.equal(shouldRace(repliesOnly, 'analyze'), true, 'the opening is a reply');
+  assert.equal(shouldRace(repliesOnly, 'discuss'), true);
+  assert.equal(shouldRace(repliesOnly, 'summarize'), false);
+
+  assert.equal(shouldRace({ raceSummary: true, raceReplies: true }, 'something-else'), false);
+  assert.equal(shouldRace(undefined, 'discuss'), false);
+});
+
+test('raceTitle names the stage, the personality and the article for the Nightshift job list', () => {
+  const news = { title: 'Chipmaker unveils a new AI accelerator' };
+  assert.equal(raceTitle('discuss', { name: 'Felix' }, news), 'Reply · Felix · Chipmaker unveils a new AI accelerator');
+  assert.equal(raceTitle('analyze', { name: 'Ada' }, news), 'Opening · Ada · Chipmaker unveils a new AI accelerator');
+  assert.equal(raceTitle('summarize', { name: 'Felix' }, news), 'Summary · Chipmaker unveils a new AI accelerator');
+  assert.equal(raceTitle('discuss', null, null), 'Reply · AI · news item');
+  assert.ok(raceTitle('discuss', { name: 'x'.repeat(200) }, { title: 'y'.repeat(500) }).length < 130, 'long names are cut');
 });

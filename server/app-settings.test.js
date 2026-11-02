@@ -60,6 +60,7 @@ test('form strings are understood and unknown keys are dropped', () => {
     parallelLanes: 1,
     pipeline: { analyze: true, discuss: true, summarize: false },
     raceSummary: false,
+    raceReplies: false,
     raceAttempts: 5
   });
 });
@@ -111,4 +112,17 @@ test('raceSummary accepts booleans and form strings and falls back on garbage', 
   assert.equal(normalizeAppSettings({ raceSummary: 'maybe' }).raceSummary, false);
   // A saved state without the setting keeps working.
   assert.equal(normalizeAppSettings({ agentsPerNews: 2 }).raceSummary, false);
+});
+
+test('racing every reply is off by default and independent of the summary race', () => {
+  assert.equal(DEFAULT_APP_SETTINGS.raceReplies, false);
+  assert.equal(normalizeAppSettings({}).raceReplies, false);
+  assert.equal(normalizeAppSettings({ raceReplies: true }).raceReplies, true);
+  assert.equal(normalizeAppSettings({ raceReplies: 'on' }).raceReplies, true);
+  assert.equal(normalizeAppSettings({ raceReplies: 'maybe' }).raceReplies, false);
+
+  const onlyReplies = normalizeAppSettings({ raceReplies: true });
+  assert.equal(onlyReplies.raceSummary, false);
+  const onlySummary = normalizeAppSettings({ raceSummary: true });
+  assert.equal(onlySummary.raceReplies, false);
 });
