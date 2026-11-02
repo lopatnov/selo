@@ -722,3 +722,42 @@ test('a job request can be given a shorter timeout, and a hung runtime is then r
   );
   assert.ok(Date.now() - startedAt < 2_000, 'it gave up at its own timeout, not the 30 s default');
 });
+
+test('the hosted Meterless endpoint reports the token count and a cap hit too', async () => {
+  const { meterlessCloud } = require('./index');
+  const savedKey = process.env.METERLESS_API_KEY;
+  const savedFetch = globalThis.fetch;
+  const replies = [
+    { finish_reason: 'stop', usage: { completion_tokens: 700 } },
+    { finish_reason: 'length', usage: undefined },
+    { finish_reason: 'stop', usage: { completion_tokens: 90 } }
+  ];
+  process.env.METERLESS_API_KEY = 'test-key';
+  globalThis.fetch = async () => {
+    const { finish_reason, usage } = replies.shift();
+    return jsonResponse(200, {
+      choices: [{ finish_reason, message: { content: 'The 30-day clock starts Monday, and if' } }],
+      usage
+    });
+  };
+
+  try {
+    const request = { model: 'gpt-4', messages: [{ role: 'user', content: 'React' }], max_tokens: 700 };
+
+    const atCap = await meterlessCloud.chatDetailed(request);
+    assert.equal(atCap.completionTokens, 700);
+    assert.equal(atCap.truncated, true);
+
+    const byFinishReason = await meterlessCloud.chatDetailed(request);
+    assert.equal(byFinishReason.completionTokens, null);
+    assert.equal(byFinishReason.truncated, true);
+
+    const finished = await meterlessCloud.chatDetailed(request);
+    assert.equal(finished.completionTokens, 90);
+    assert.equal(finished.truncated, false);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedKey === undefined) delete process.env.METERLESS_API_KEY;
+    else process.env.METERLESS_API_KEY = savedKey;
+  }
+});

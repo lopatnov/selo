@@ -101,13 +101,13 @@ function firstString(...values) {
 /**
  * The completion tokens of a reply and whether they reached the cap. The runtime
  * reports `finish_reason: "stop"` even when the cap cut the reply, so the token
- * count is the only sign of a cut.
+ * count is the main sign of a cut; an endpoint that says `"length"` is believed.
  */
 function tokenUse(data, maxTokens) {
   const used = data?.usage?.completion_tokens;
   const completionTokens = Number.isFinite(used) ? used : null;
-  const truncated = completionTokens !== null && Number.isFinite(maxTokens) && completionTokens >= maxTokens;
-  return { completionTokens, truncated };
+  const capHit = completionTokens !== null && Number.isFinite(maxTokens) && completionTokens >= maxTokens;
+  return { completionTokens, truncated: capHit || data?.choices?.[0]?.finish_reason === 'length' };
 }
 
 /**
@@ -792,6 +792,8 @@ function createMeterlessRuntime(options = {}) {
 }
 
 module.exports = {
+  firstString,
+  tokenUse,
   APP_HEADER,
   CHAT_SCOPE,
   CHAT_TIMEOUT_MS,

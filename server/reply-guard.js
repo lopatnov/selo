@@ -47,6 +47,34 @@ function endsComplete(text) {
   return SENTENCE_END.test(value.slice(0, trimmedEnd(value, EMPHASIS)));
 }
 
+// Words a finished sentence does not end on ("... and if", "... can share a").
+const DANGLING_WORDS = new Set([
+  ...['a', 'an', 'the', 'and', 'or', 'but', 'if', 'when', 'while', 'because', 'although', 'though'],
+  ...['unless', 'until', 'of', 'with', 'from', 'as', 'than', 'which', 'whose'],
+  ...['my', 'your', 'our', 'their', 'its']
+]);
+
+/** Does the text stop on a comma, a dash or a word that needs a continuation? */
+function endsDangling(text) {
+  const value = typeof text === 'string' ? text.trim() : '';
+  const stripped = value.slice(0, trimmedEnd(value, EMPHASIS));
+  if (/[,;:—–-]$/u.test(stripped)) return true;
+
+  let start = stripped.length;
+  while (start > 0 && /[\p{L}']/u.test(stripped[start - 1])) start -= 1;
+  return DANGLING_WORDS.has(stripped.slice(start).toLowerCase());
+}
+
+/**
+ * Is this reply cut off? After a cap hit the reply has to end like a sentence.
+ * Below the cap a reply without a full stop can still be finished ("Hard pass"),
+ * so only an ending that cannot be the end counts.
+ */
+function isCut(text, capHit) {
+  if (endsComplete(text)) return false;
+  return capHit === true || endsDangling(text);
+}
+
 const EMPHASIS = new Set(['*', '_', '`']);
 const SENTENCE_STOPS = new Set(['.', '!', '?', '…']);
 const SENTENCE_CLOSERS = new Set(['"', "'", '”', '’', ')', ']', '*', '_', '~']);
@@ -96,15 +124,19 @@ function shortenToCompleteSentence(text, minKept = MIN_KEPT_CHARS) {
 
 // Openers that only a chain of thought has; "Okay, ..." or "Hmm" can start an
 // in-character reply, so they are not here.
+// Only planning verbs count: "So I have to ask ..." or "Let me think ..." are
+// things a personality says.
 const REASONING_PATTERNS = [
-  /^(?:let me|let's) (?:analy[sz]e|think|break|look|parse|review|figure|consider|re-?read|check|start by)\b/i,
-  /^(?:first|so),? (?:i|we) (?:need|should|must|have) to\b/i,
-  /^(?:i|we) (?:need|must|should) to (?:analy[sz]e|figure|look|react|respond|write|craft|consider|think)\b/i,
+  /^(?:let me|let's) (?:analy[sz]e|parse|re-?read|break (?:this|it) down|start by (?:analy[sz]|re-?read|reading|looking))\b/i,
+  /^(?:(?:first|so|okay|ok),? )?(?:i|we) (?:need|must|should|have) to (?:analy[sz]e|figure out|craft|write (?:a|the|my) (?:reply|response|comment|reaction)|react as|respond as|consider (?:the|what))\b/i,
   /^the (?:user|task|prompt|instructions?) (?:wants|is asking|asks|says|said|requires|states)\b/i,
   /^looking at (?:the|this) (?:discussion|news|conversation|messages?|prompt)\b/i,
-  /^(?:analysis|reasoning|thinking|plan)\s*:/i,
-  /\bmessage #\d+\b/i
+  /^(?:analysis|reasoning|thinking|plan)\s*:/i
 ];
+
+// The discussion numbers its messages, so a personality can cite "message #3".
+// Only a cut reply that does so is taken for reasoning.
+const CITES_MESSAGE = /\bmessage #\d+\b/i;
 
 const ECHO_WINDOW = 48;
 
@@ -129,7 +161,11 @@ function echoesInstructions(text, instructions) {
 function looksLikeReasoning(text, instructions = '') {
   const value = squash(text);
   if (!value) return false;
-  return REASONING_PATTERNS.some(pattern => pattern.test(value)) || echoesInstructions(value, instructions);
+  return (
+    REASONING_PATTERNS.some(pattern => pattern.test(value)) ||
+    (CITES_MESSAGE.test(value) && !endsComplete(value)) ||
+    echoesInstructions(value, instructions)
+  );
 }
 
 function joinParts(parts) {
@@ -160,7 +196,7 @@ async function askOnce(ask, cap, instructions) {
 
   const reasoning = joinParts([result?.reasoning, think]);
   if (!answer) return { ...base, answer: '', reasoning, problem: 'empty' };
-  return { ...base, answer, reasoning, problem: endsComplete(answer) ? null : 'cut' };
+  return { ...base, answer, reasoning, problem: isCut(answer, base.truncated) ? 'cut' : null };
 }
 
 function report(result, { retried, trimmed }) {
@@ -231,6 +267,7 @@ module.exports = {
   MIN_REPLY_TOKENS,
   askWithRepair,
   echoesInstructions,
+  endsDangling,
   endsComplete,
   looksLikeReasoning,
   resolveReplyTokenCap,

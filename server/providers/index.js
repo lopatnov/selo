@@ -4,7 +4,9 @@ const { normalizeBaseUrl } = require('./base-url');
 const {
   CHAT_TIMEOUT_MS,
   ProviderError,
-  createMeterlessRuntime
+  createMeterlessRuntime,
+  firstString,
+  tokenUse
 } = require('./meterless-runtime');
 
 /**
@@ -98,16 +100,13 @@ function createMeterlessCloud() {
       throw new ProviderError('invalid_response', 'Meterless Cloud returned no text content.');
     }
 
-    const reasoning =
-      typeof message?.reasoning_content === 'string'
-        ? message.reasoning_content
-        : typeof message?.reasoning === 'string'
-          ? message.reasoning
-          : typeof choice?.reasoning_content === 'string'
-            ? choice.reasoning_content
-            : '';
-
-    return { content, reasoning, model, durationMs: Date.now() - startedAt };
+    return {
+      content,
+      reasoning: firstString(message?.reasoning_content, message?.reasoning, choice?.reasoning_content),
+      model,
+      durationMs: Date.now() - startedAt,
+      ...tokenUse(data, options.max_tokens)
+    };
   }
 
   /** The provider contract: a plain string answer. */

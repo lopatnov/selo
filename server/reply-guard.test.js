@@ -10,6 +10,7 @@ const {
   askWithRepair,
   echoesInstructions,
   endsComplete,
+  endsDangling,
   looksLikeReasoning,
   resolveReplyTokenCap,
   shortenToCompleteSentence
@@ -58,6 +59,15 @@ test('endsComplete accepts punctuation, closers and emoji, and rejects a cut', (
   }
 });
 
+test('endsDangling tells a cut from a short finished reply', () => {
+  for (const text of [CUT, 'and if', 'We could try, ', 'Almost there:', 'about the', 'Wait —', 'bring your']) {
+    assert.equal(endsDangling(text), true, text);
+  }
+  for (const text of ['Hard pass', "That'd be a win", 'lol same', 'Cheese board forever', 'see you then']) {
+    assert.equal(endsDangling(text), false, text);
+  }
+});
+
 test('shortenToCompleteSentence keeps whole sentences', () => {
   const text = 'First point stands and it is a long one. Second point is also here. Third is cut and';
   assert.equal(
@@ -97,13 +107,21 @@ test('shortenToCompleteSentence gives up when too little is left', () => {
   assert.equal(shortenToCompleteSentence(undefined), null);
 });
 
-test('looksLikeReasoning spots planning, but not an in-character "okay"', () => {
+test('looksLikeReasoning spots planning, but not what a personality says', () => {
   assert.equal(looksLikeReasoning('Let me analyze the discussion first. Alice said...'), true);
   assert.equal(looksLikeReasoning('The user wants me to react as Bob.'), true);
-  assert.equal(looksLikeReasoning('Alice contradicts message #26 in the thread.'), true);
+  assert.equal(looksLikeReasoning('Okay, I need to analyze the news first.'), true);
+  assert.equal(looksLikeReasoning('First, I need to figure out what Alice meant.'), true);
   assert.equal(looksLikeReasoning('Okay, that is the funniest thing I read today.'), false);
+  assert.equal(looksLikeReasoning('So I have to ask: who is bringing the crackers?'), false);
+  assert.equal(looksLikeReasoning('Let me think... no, the cheese board still wins.'), false);
   assert.equal(looksLikeReasoning(DONE), false);
   assert.equal(looksLikeReasoning(''), false);
+});
+
+test('citing a message number is reasoning only when the reply is also cut', () => {
+  assert.equal(looksLikeReasoning('I disagree with message #3, the cheese board still wins.'), false);
+  assert.equal(looksLikeReasoning('Alice contradicts message #26 in the thread, so message #27 is'), true);
 });
 
 test('echoesInstructions finds a long verbatim stretch of the prompt only', () => {
@@ -130,6 +148,26 @@ test('a clean reply costs one call and is not touched', async () => {
     retried: false,
     trimmed: false
   });
+});
+
+test('a finished reply without a full stop is left alone below the cap', async () => {
+  const { ask, caps } = scripted({ content: "Hard pass, that'd be a win", completionTokens: 12, truncated: false });
+  const result = await askWithRepair({ ask, cap: 2000 });
+
+  assert.deepEqual(caps, [2000]);
+  assert.equal(result.answer, "Hard pass, that'd be a win");
+  assert.equal(result.reply.retried, false);
+});
+
+test('after a cap hit the reply has to end like a sentence', async () => {
+  const { ask, caps } = scripted(
+    { content: 'Hard pass on that one', completionTokens: 2000, truncated: true },
+    { content: DONE, truncated: false }
+  );
+  const result = await askWithRepair({ ask, cap: 2000 });
+
+  assert.deepEqual(caps, [2000, 4000]);
+  assert.equal(result.answer, DONE);
 });
 
 test('a reply that hit the cap is asked again with twice the room', async () => {
