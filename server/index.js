@@ -16,6 +16,7 @@ const { createZetarisStore } = require('./zetaris-store');
 const { createPersistence } = require('./persistence');
 const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
+const { decodeHtmlEntities, repairTitles } = require('./html-entities');
 const { sanitizeModelText } = require('./meterless-text');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
 const { createMeterlessLog, defaultLogFile } = require('./meterless-log');
@@ -132,6 +133,12 @@ async function hydrateStorage() {
   storage.comments = saved.comments;
   storage.participantId = saved.participantId;
   storage.settings = normalizeAppSettings(saved.settings);
+  // Titles saved before feed text was decoded still show `&#8217;`.
+  const repaired = repairTitles(storage.news);
+  if (repaired > 0) {
+    console.log(`Decoded HTML entities in ${repaired} saved news title${repaired === 1 ? '' : 's'}.`);
+    persist();
+  }
   // The Zetaris copy of the Meterless log wins, unless it is empty and this
   // machine's own file still holds records (they are sent to Zetaris instead).
   if (saved.meterlessLog && (saved.meterlessLog.entries.length > 0 || meterlessLog.size === 0)) {
@@ -1412,8 +1419,8 @@ async function fetchSource(source) {
         id: randomUUID(),
         sourceId: source.id,
         sourceName: source.name,
-        title: item.title || '(untitled)',
-        content: item.contentSnippet || item.content || '',
+        title: decodeHtmlEntities(item.title).trim() || '(untitled)',
+        content: decodeHtmlEntities(item.contentSnippet || item.content),
         link: item.link,
         pubDate: item.pubDate,
         fetchedAt: new Date().toISOString()
