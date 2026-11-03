@@ -532,8 +532,13 @@ exact statement and how long it took.
 
 Every list is ranked and bounded by a `LIMIT`, so a growing number of RSS sources,
 personalities or models does not grow the page. Each query is independent: one that
-fails shows its own error and the others still render. When the app data is not in
+fails shows its own error and the others still render; the error is a fixed,
+safe sentence (key refused, Zetaris unreachable, or "could not run this query"), and
+what Zetaris actually said goes to the server log only. When the app data is not in
 Zetaris (`SELO_STORAGE=local`, or no key) the page says so instead of failing.
+The app fills the Zetaris tables with a short delay, so while a save is waiting (or
+Zetaris refused the last one) the page shows a warning that the numbers may be a
+moment behind. A request that is answered late never replaces a newer one.
 `npm test` covers the queries (read-only, bounded, one statement), and
 `npm --prefix tests run test:insights` the page.
 

@@ -13,7 +13,7 @@ const { createProvidersRouter } = require('./providers/routes');
 const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { createZetarisStore } = require('./zetaris-store');
-const { createInsights } = require('./insights');
+const { createInsights, describeFreshness } = require('./insights');
 const { createPersistence } = require('./persistence');
 const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
@@ -1782,7 +1782,7 @@ app.get('/api/storage', (req, res) => {
 // Insights: a fixed set of read-only questions about the app's data, answered by
 // Zetaris (joins, aggregates, JSON fields). Needs the data to live in Zetaris.
 app.get('/api/insights', async (req, res) => {
-  const { backend, database } = persistence.status();
+  const { backend, database, health } = persistence.status();
   if (backend !== 'zetaris') {
     return res.json({
       available: false,
@@ -1791,7 +1791,12 @@ app.get('/api/insights', async (req, res) => {
       items: []
     });
   }
-  res.json({ available: true, ...(await createInsights({ zetaris, database }).run()) });
+  // `stale` tells the page when Zetaris has not received the latest changes yet.
+  res.json({
+    available: true,
+    ...describeFreshness({ health }),
+    ...(await createInsights({ zetaris, database }).run())
+  });
 });
 
 // Zetaris: read-only SQL. Anything that is not a single SELECT/SHOW/DESCRIBE/WITH
