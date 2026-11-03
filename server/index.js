@@ -13,6 +13,7 @@ const { createProvidersRouter } = require('./providers/routes');
 const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { createZetarisStore } = require('./zetaris-store');
+const { createInsights } = require('./insights');
 const { createPersistence } = require('./persistence');
 const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
@@ -1776,6 +1777,21 @@ app.get('/api/zetaris', async (req, res) => {
 // last save reached it.
 app.get('/api/storage', (req, res) => {
   res.json(persistence.status());
+});
+
+// Insights: a fixed set of read-only questions about the app's data, answered by
+// Zetaris (joins, aggregates, JSON fields). Needs the data to live in Zetaris.
+app.get('/api/insights', async (req, res) => {
+  const { backend, database } = persistence.status();
+  if (backend !== 'zetaris') {
+    return res.json({
+      available: false,
+      reason:
+        'Insights are worked out by Zetaris, and the app data is not stored there. Set ZETARIS_API_KEY and ZETARIS_ORG_ID in .env and do not use SELO_STORAGE=local.',
+      items: []
+    });
+  }
+  res.json({ available: true, ...(await createInsights({ zetaris, database }).run()) });
 });
 
 // Zetaris: read-only SQL. Anything that is not a single SELECT/SHOW/DESCRIBE/WITH

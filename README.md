@@ -93,6 +93,7 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
 | **RSS Sources**         | `/sources`   | **+ Add Source**, **Fetch all now**, per-feed **Fetch now** and **Delete**, item count, last fetch time, last error                                                                                                                               |
 | **Users**               | `/users`     | **+ Add User**, **Edit** a personality (who am I, model, personality and every discussion setting), **Delete** (the local participant is protected); also the deployment-wide **Agents per news**, **Parallel lanes** and **Discussion pipeline** |
 | **AI Provider**         | `/providers` | Meterless Runtime and Zetaris status badges, **Save** base URL/token, **Auto Detect**, **Re-check status**, paste a **Connect** link, **Refresh** models, **Send test request**, **Run query** (read-only SQL)                                    |
+| **Insights**            | `/insights`  | Cards worked out by Zetaris with SQL: totals, discussion per RSS source, most discussed news, who talks the most, model speed and failures, why requests failed, repaired replies, comments per day; **🔄 Refresh**, and the SQL behind every card |
 | **Add RSS Source form** | `/add-rss`   | Direct link to the feed form with popular-feed examples                                                                                                                                                                                           |
 | **Add User form**       | `/add-user`  | Direct link to the personality form with personality examples                                                                                                                                                                                     |
 
@@ -239,6 +240,7 @@ There is no auth header anywhere; every route below is open by design.
 | `GET`          | `/api/zetaris`                                   | Zetaris config, live status and where the app data is saved (`storage`)                                     |
 | `GET`          | `/api/storage`                                   | Storage backend (`zetaris` / `local`), database, health (`synced` / `pending` / `degraded`), last save      |
 | `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`                                                   |
+| `GET`          | `/api/insights`                                  | The Insights cards: a fixed set of read-only SQL questions answered by Zetaris (rows, SQL and timing each)  |
 | `GET`          | `/api/providers/status`                          | Summary of both providers                                                                                   |
 | `GET`          | `/api/providers`                                 | Registered provider descriptors                                                                             |
 | `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                                                                     |
@@ -505,6 +507,35 @@ Zetaris connectivity is real and visible: the AI Provider page shows `online` /
 `unauthorized` / `offline` / `not configured`, decided by running `SELECT 1`
 through the REST API, and a separate **App data** line says where the data is
 saved and whether the last save reached it.
+
+---
+
+## Insights: questions asked of Zetaris
+
+The **Insights** page (`/insights`) is where Zetaris does the work it is good at.
+The app keeps its data in Zetaris tables (see *Data Storage Architecture*), and
+each card is one read-only SQL query that the server sends to Zetaris
+(`GET /api/insights`): joins, aggregates and JSON fields. None of the numbers is
+counted in the app, and the **SQL run by Zetaris** line under every card shows the
+exact statement and how long it took.
+
+| Card                          | What it asks                                                                                       |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- |
+| **In Zetaris right now**      | Rows in `rss_sources`, `news`, `comments` and `meterless_log`                                    |
+| **Discussion by RSS source**  | News kept and comments written, per source (`news` joined with `comments`), top 15 by comments     |
+| **Most discussed news**       | The 10 news items with the most comments                                                           |
+| **Who talks the most**        | Comments and average length per personality (summaries and errors left out)                        |
+| **Models: speed and failures** | Requests, failures and average seconds per model id, from the Meterless log                        |
+| **Why requests failed**       | Failed model requests grouped by reason                                                            |
+| **Reply guard**               | Replies that were repaired or shortened (reads the JSON `reply` field of the log record)           |
+| **Comments per day**          | The last 14 days, and how many comments were AI                                                    |
+
+Every list is ranked and bounded by a `LIMIT`, so a growing number of RSS sources,
+personalities or models does not grow the page. Each query is independent: one that
+fails shows its own error and the others still render. When the app data is not in
+Zetaris (`SELO_STORAGE=local`, or no key) the page says so instead of failing.
+`npm test` covers the queries (read-only, bounded, one statement), and
+`npm --prefix tests run test:insights` the page.
 
 ---
 
@@ -887,7 +918,7 @@ npm run smoke             # boots the API and checks the no-login flow end to en
 ### Pages
 
 There is **no login page and no authentication** anywhere in the app. Four
-pages, open by design:
+pages (plus Insights), open by design:
 
 | Page            | Route        | What it does                                             |
 | --------------- | ------------ | -------------------------------------------------------- |
@@ -895,6 +926,7 @@ pages, open by design:
 | **RSS Sources** | `/sources`   | Every feed, item count, last fetch result, fetch/delete  |
 | **Users**       | `/users`     | AI personalities (name, routing mode, personality)       |
 | **AI Provider** | `/providers` | Meterless Runtime + Zetaris status, models, test queries |
+| **Insights**    | `/insights`  | What the app's data says, worked out by Zetaris (SQL)    |
 
 Comments are posted as the single local participant that the server creates on
 first use (`GET /api/participant`), so nothing has to be signed in.
@@ -1237,6 +1269,12 @@ One-time setup:
 ```bash
 npm --prefix tests install
 npm --prefix tests run install-browsers
+```
+
+The Insights page has its own hermetic suite (`/api/insights` is mocked in the browser):
+
+```bash
+npm --prefix tests run test:insights
 ```
 
 Focused, hermetic suite for the news feed and the comments:
