@@ -253,6 +253,17 @@ services:
       METERLESS_BASE_URL: ${METERLESS_BASE_URL:-}
       METERLESS_RUNTIME_TOKEN: ${METERLESS_RUNTIME_TOKEN:-}
 
+      # AI and discussion tuning. Only variables listed here reach the container, so
+      # each needs a line; the defaults are the server's own.
+      #   SELO_MAX_REPLY_TOKENS      room for one AI reply, 200 to 6000
+      #   SELO_ASK_MODEL             the model behind Insights > Ask the data
+      #   SELO_MAX_CONCURRENT_TURNS  simultaneous model calls over all discussions
+      #   SELO_MAX_CONCURRENT_RACES  simultaneous Nightshift races
+      SELO_MAX_REPLY_TOKENS: ${SELO_MAX_REPLY_TOKENS:-2000}
+      SELO_ASK_MODEL: ${SELO_ASK_MODEL:-meterless/auto}
+      SELO_MAX_CONCURRENT_TURNS: ${SELO_MAX_CONCURRENT_TURNS:-8}
+      SELO_MAX_CONCURRENT_RACES: ${SELO_MAX_CONCURRENT_RACES:-2}
+
       # Server config
       PORT: 3001
       NODE_ENV: production

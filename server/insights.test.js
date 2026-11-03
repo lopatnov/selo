@@ -134,9 +134,12 @@ test('the cards are fresh only when Zetaris has every change', () => {
   assert.equal(describeFreshness().stale, true);
 });
 
-test('discussion is grouped by source id, so two feeds with one name stay apart', () => {
+test('discussion is grouped by source id, and a feed that is gone is marked as removed', () => {
   const sql = INSIGHTS.find(insight => insight.id === 'comments-by-source').sql('selo');
-  assert.match(sql, /GROUP BY n\.source_id, n\.source_name/);
+  assert.match(sql, /GROUP BY n\.source_id, n\.source_name, s\.id/);
+  // A news item whose source no longer exists has no row in rss_sources.
+  assert.match(sql, /LEFT JOIN selo\.rss_sources s ON s\.id = n\.source_id/);
+  assert.match(sql, /WHEN s\.id IS NULL THEN concat\(n\.source_name, ' \(removed\)'\)/);
 });
 
 test('the personality ranking counts AI comments only', () => {
