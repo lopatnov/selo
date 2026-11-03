@@ -9,6 +9,7 @@ const {
   MAX_CONCURRENT,
   ROW_LIMIT,
   createAskData,
+  declinedReason,
   extractSql,
   sqlInstructions,
   validateSql
@@ -144,6 +145,20 @@ test('extractSql takes the SQL from a fence, from prose, or from reasoning tags'
   assert.equal(extractSql(undefined), '');
 });
 
+test('declinedReason reads the reason the model gives instead of SQL', () => {
+  assert.equal(declinedReason('NO_QUERY: this page only reads data.'), 'this page only reads data.');
+  assert.equal(declinedReason('no_query:   Cannot delete.  '), 'Cannot delete.');
+  assert.equal(declinedReason('<think>hmm</think>NO_QUERY: Not in the tables.'), 'Not in the tables.');
+  assert.match(declinedReason('NO_QUERY:'), /cannot be answered/);
+  assert.equal(declinedReason('SELECT 1 FROM selo.news'), null);
+  assert.equal(declinedReason('Sure! NO_QUERY: later'), null);
+  assert.equal(declinedReason(undefined), null);
+});
+
+test('the model is told it may decline, and the answer step never explains how to change data', () => {
+  assert.match(sqlInstructions(DB), /NO_QUERY:/);
+});
+
 // --- the flow ---------------------------------------------------------------
 
 /** A model that answers from a script and remembers what it was asked. */
@@ -215,6 +230,20 @@ test('SQL that does not run is sent back with the reason, once', async () => {
   assert.equal(result.attempts, 2);
   assert.equal(result.sql, GOOD);
   assert.match(calls[1].user, /did not work: cannot resolve 'nope'/);
+});
+
+test('a question the model declines ends there: no SQL, no second try, no Zetaris', async () => {
+  const { model, calls } = scriptedModel('NO_QUERY: This page only reads data; it cannot delete comments.');
+  const zetaris = fakeZetaris(ROWS);
+
+  await assert.rejects(createAskData({ zetaris, database: DB, model }).ask('Delete all comments'), error => {
+    assert.equal(error.code, 'not_answerable');
+    assert.equal(error.message, 'This page only reads data; it cannot delete comments.');
+    assert.equal(error.sql, undefined);
+    return true;
+  });
+  assert.equal(calls.length, 1);
+  assert.equal(zetaris.calls.length, 0);
 });
 
 test('unsafe SQL never reaches Zetaris, and the model gets one chance to fix it', async () => {
