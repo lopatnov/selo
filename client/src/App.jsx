@@ -4,13 +4,14 @@ import './App.css';
 
 import AddRSSSource from './components/AddRSSSource';
 import AddUser from './components/AddUser';
+import Insights from './components/Insights';
 import NewsFeed from './components/NewsFeed';
 import ProviderSettings from './components/ProviderSettings';
 import SourcesList from './components/SourcesList';
 import UsersList from './components/UsersList';
 
 /**
- * No authentication anywhere: News Feed, RSS Sources, Users, AI Provider.
+ * No authentication anywhere: News Feed, RSS Sources, Users, AI Provider, Insights.
  * There is no login route and no token in localStorage.
  *
  * The only WebSocket of the app belongs to the pages that need live updates
@@ -26,6 +27,7 @@ function App() {
           <Link to="/sources">RSS Sources</Link>
           <Link to="/users">Users</Link>
           <Link to="/providers">AI Provider</Link>
+          <Link to="/insights">Insights</Link>
         </nav>
       </header>
 
@@ -36,6 +38,7 @@ function App() {
           <Route path="/sources" element={<SourcesList />} />
           <Route path="/users" element={<UsersList />} />
           <Route path="/providers" element={<ProviderSettings />} />
+          <Route path="/insights" element={<Insights />} />
           <Route path="/add-rss" element={<AddRSSSource />} />
           <Route path="/add-user" element={<AddUser />} />
           <Route path="*" element={<Navigate to="/feed" replace />} />

@@ -1158,3 +1158,95 @@ body {
   background: #fdf6e8;
   color: #b7791f;
 }
+/* Insights */
+.insights-description {
+  margin: 0.25rem 0 0.75rem;
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.insights-title {
+  margin: 0;
+  color: #2c3e50;
+}
+
+.insights-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.insights-stat {
+  display: flex;
+  flex-direction: column;
+  min-width: 8rem;
+  padding: 0.75rem 1rem;
+  background: #f5f7fa;
+  border-radius: 8px;
+}
+
+.insights-stat strong {
+  font-size: 1.6rem;
+  color: #2c3e50;
+}
+
+.insights-stat span {
+  font-size: 0.85rem;
+  color: #666;
+  text-transform: capitalize;
+}
+
+.insights-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+
+.insights-table th {
+  text-align: left;
+  padding: 0.4rem 0.6rem;
+  color: #666;
+  font-weight: 600;
+  text-transform: capitalize;
+  border-bottom: 1px solid #e1e5ea;
+}
+
+.insights-table td {
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid #f0f2f5;
+  vertical-align: middle;
+}
+
+.insights-bar-cell {
+  position: relative;
+  min-width: 10rem;
+}
+
+.insights-bar {
+  position: absolute;
+  top: 0.3rem;
+  bottom: 0.3rem;
+  left: 0.6rem;
+  max-width: calc(100% - 1.2rem);
+  background: #cfe3f7;
+  border-radius: 4px;
+}
+
+.insights-value {
+  position: relative;
+}
+
+.insights-sql {
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+  color: #666;
+}
+
+.insights-sql pre {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #f5f7fa;
+  border-radius: 6px;
+}
