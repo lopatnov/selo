@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import API_BASE from '../api';
+import AskData from './AskData';
 
 function label(column) {
   return String(column).replaceAll('_', ' ');
@@ -144,6 +145,8 @@ function Insights() {
           Zetaris did not answer: {failed[0].error} <Link to="/providers">Zetaris status</Link>
         </div>
       )}
+
+      {data?.available !== false && <AskData />}
 
       {items.map(item => (
         <InsightCard key={item.id} item={item} />

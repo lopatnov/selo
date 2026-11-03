@@ -93,7 +93,7 @@ A web-based platform for AI-mediated discussions on news articles. Users can:
 | **RSS Sources**         | `/sources`   | **+ Add Source**, **Fetch all now**, per-feed **Fetch now** and **Delete**, item count, last fetch time, last error                                                                                                                               |
 | **Users**               | `/users`     | **+ Add User**, **Edit** a personality (who am I, model, personality and every discussion setting), **Delete** (the local participant is protected); also the deployment-wide **Agents per news**, **Parallel lanes** and **Discussion pipeline** |
 | **AI Provider**         | `/providers` | Meterless Runtime and Zetaris status badges, **Save** base URL/token, **Auto Detect**, **Re-check status**, paste a **Connect** link, **Refresh** models, **Send test request**, **Run query** (read-only SQL)                                    |
-| **Insights**            | `/insights`  | Cards worked out by Zetaris with SQL: totals, discussion per RSS source, most discussed news, who talks the most, model speed and failures, why requests failed, repaired replies, comments per day; **🔄 Refresh**, and the SQL behind every card |
+| **Insights**            | `/insights`  | Cards worked out by Zetaris with SQL: totals, discussion per RSS source, most discussed news, who talks the most, model speed and failures, why requests failed, repaired replies, comments per day; **🔄 Refresh**, the SQL behind every card, and **💬 Ask the data** (a question in words → guarded SQL → answer) |
 | **Add RSS Source form** | `/add-rss`   | Direct link to the feed form with popular-feed examples                                                                                                                                                                                           |
 | **Add User form**       | `/add-user`  | Direct link to the personality form with personality examples                                                                                                                                                                                     |
 
@@ -241,6 +241,7 @@ There is no auth header anywhere; every route below is open by design.
 | `GET`          | `/api/storage`                                   | Storage backend (`zetaris` / `local`), database, health (`synced` / `pending` / `degraded`), last save      |
 | `POST`         | `/api/zetaris/query`                             | Run one read-only `SELECT` / `SHOW` / `DESCRIBE` / `WITH`                                                   |
 | `GET`          | `/api/insights`                                  | The Insights cards: a fixed set of read-only SQL questions answered by Zetaris (rows, SQL and timing each)  |
+| `POST`         | `/api/ask-data`                                  | `{ question }` → the model writes a guarded read-only SELECT, Zetaris runs it, `{ answer, sql, columns, rows }` |
 | `GET`          | `/api/providers/status`                          | Summary of both providers                                                                                   |
 | `GET`          | `/api/providers`                                 | Registered provider descriptors                                                                             |
 | `GET`          | `/api/providers/meterless`                       | Runtime config, token source and status                                                                     |
@@ -537,6 +538,31 @@ Zetaris (`SELO_STORAGE=local`, or no key) the page says so instead of failing.
 `npm test` covers the queries (read-only, bounded, one statement), and
 `npm --prefix tests run test:insights` the page.
 
+### Ask the data
+
+The same page has an **Ask the data** card: type a question in your own words (any
+language the model reads) and get an answer, the rows behind it and the SQL that
+produced them (`POST /api/ask-data`). It works in four steps:
+
+1. The model is told the app tables and what their columns hold and writes **one
+   Spark SQL `SELECT`** (`SELO_ASK_MODEL`, default `meterless/auto`).
+2. The server **checks the statement itself**, not the prompt: it must start with
+   `SELECT` / `WITH`, be a single statement without comments, backticks or double
+   quotes, contain no writing or calling-out word (`INSERT`, `DROP`, `reflect`,
+   `java_method`, ...), read only `<database>.rss_sources / users / news / comments /
+   meterless_log` (not `app_state`, not another database, no comma joins) and is
+   bounded by a `LIMIT` of at most 100. Anything else is refused and never reaches
+   Zetaris.
+3. Zetaris runs it. If the SQL is refused or does not run, the model gets the reason
+   and **one more try**; the page then says the SQL was written again.
+4. The model puts up to 30 rows into one to four sentences, in the language of the
+   question. The rows are passed as data, with instruction-like text neutralized.
+
+At most two questions are answered at once. A question costs two model calls (three
+or four when the SQL has to be rewritten). The answer comes from SQL written by a
+model, so it can be wrong when the model misreads a column: the SQL is always shown
+so it can be checked.
+
 ---
 
 ## Why Nightshift shows one lane, and how a race fixes it
@@ -786,6 +812,7 @@ SELO_SETTINGS_FILE=/path/to/settings.json    # provider settings, including the 
 SELO_STATE_FILE=/path/to/state.json          # local mirror of the app data (Zetaris holds the original)
 SELO_STORAGE=local                           # keep the app data only in the local file, no Zetaris storage
 SELO_MAX_REPLY_TOKENS=2000                   # room for one reply, 200 to 6000 (a cut reply is retried with twice the room)
+SELO_ASK_MODEL=meterless/auto                # the model that writes the SQL and the answer on "Ask the data"
 ZETARIS_APP_DATABASE=selo                    # Zetaris Lightning database that holds the app data
 ```
 

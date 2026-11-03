@@ -14,6 +14,7 @@ const { createZetaris, ZetarisError } = require('./zetaris');
 const { createStateStore } = require('./state-store');
 const { createZetarisStore } = require('./zetaris-store');
 const { createInsights } = require('./insights');
+const { AskError, createAskData } = require('./ask-data');
 const { createPersistence } = require('./persistence');
 const { createRaceCaller, pickRace, raceTitle, shouldRace } = require('./race-call');
 const { adoptRecords } = require('./state-merge');
@@ -1792,6 +1793,64 @@ app.get('/api/insights', async (req, res) => {
     });
   }
   res.json({ available: true, ...(await createInsights({ zetaris, database }).run()) });
+});
+
+// Ask the data: a question in plain words. The model writes one SELECT, the guard
+// lets through only a read-only query on the app tables, Zetaris runs it, and the
+// model puts the rows into words.
+const ASK_MODEL = (process.env.SELO_ASK_MODEL || '').trim() || 'meterless/auto';
+const ASK_STATUS = Object.freeze({
+  invalid_question: 400,
+  busy: 429,
+  unsafe_sql: 422,
+  query_failed: 422,
+  unauthorized: 502
+});
+const ASK_MODEL_FAILURES = new Set(['offline', 'unauthorized', 'invalid_response']);
+
+function askModel({ system, user, maxTokens }) {
+  return providerForModel(ASK_MODEL).chatDetailed({
+    model: providerModelName(ASK_MODEL),
+    messages: [
+      { role: 'system', content: system },
+      { role: 'user', content: user }
+    ],
+    max_tokens: maxTokens,
+    temperature: 0.1
+  });
+}
+
+// One instance per database, so its limit on questions in flight holds across requests.
+let askData = null;
+function askDataFor(database) {
+  if (askData?.database !== database) {
+    askData = { database, instance: createAskData({ zetaris, database, model: askModel }) };
+  }
+  return askData.instance;
+}
+
+app.post('/api/ask-data', async (req, res) => {
+  const { backend, database } = persistence.status();
+  if (backend !== 'zetaris') {
+    return res.status(409).json({
+      error: 'The app data is not stored in Zetaris, so there is nothing to ask. Set ZETARIS_API_KEY and ZETARIS_ORG_ID in .env.',
+      code: 'unavailable'
+    });
+  }
+
+  try {
+    res.json(await askDataFor(database).ask(req.body?.question));
+  } catch (error) {
+    if (error instanceof AskError) {
+      const body = { error: error.message, code: error.code };
+      if (error.sql) body.sql = error.sql;
+      return res.status(ASK_STATUS[error.code] ?? 422).json(body);
+    }
+    if (ASK_MODEL_FAILURES.has(error?.code)) {
+      return res.status(502).json({ error: error.message, code: error.code });
+    }
+    throw error;
+  }
 });
 
 // Zetaris: read-only SQL. Anything that is not a single SELECT/SHOW/DESCRIBE/WITH
