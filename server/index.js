@@ -1835,7 +1835,7 @@ function askDataFor(database) {
 }
 
 app.post('/api/ask-data', async (req, res) => {
-  const { backend, database } = persistence.status();
+  const { backend, database, health } = persistence.status();
   if (backend !== 'zetaris') {
     return res.status(409).json({
       error: 'The app data is not stored in Zetaris, so there is nothing to ask. Set ZETARIS_API_KEY and ZETARIS_ORG_ID in .env.',
@@ -1844,7 +1844,8 @@ app.post('/api/ask-data', async (req, res) => {
   }
 
   try {
-    res.json(await askDataFor(database).ask(req.body?.question));
+    // `stale`: Zetaris has not received the latest changes yet, so the answer may be a moment behind.
+    res.json({ ...(await askDataFor(database).ask(req.body?.question)), ...describeFreshness({ health }) });
   } catch (error) {
     if (error instanceof AskError) {
       const body = { error: error.message, code: error.code };

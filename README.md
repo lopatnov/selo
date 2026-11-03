@@ -566,7 +566,9 @@ produced them (`POST /api/ask-data`). It works in four steps:
 At most two questions are answered at once. A question costs two model calls (three
 or four when the SQL has to be rewritten). The answer comes from SQL written by a
 model, so it can be wrong when the model misreads a column: the SQL is always shown
-so it can be checked.
+so it can be checked. When Zetaris refuses a query the page shows a fixed sentence
+(what Zetaris said stays in the server log), and a warning says when the answer may be
+a moment behind the app because a save to Zetaris is still waiting.
 
 ---
 

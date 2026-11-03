@@ -14,6 +14,7 @@
  * checks the statement itself, and the rows are framed as data.
  */
 
+const { safeError } = require('./insights');
 const { sanitizeModelText } = require('./meterless-text');
 const { sanitizeUntrustedInput } = require('./prompt-guard');
 const { LOG_TABLE, TABLES } = require('./zetaris-store');
@@ -192,6 +193,17 @@ function declinedReason(reply) {
 
 // --- the flow ----------------------------------------------------------------
 
+/**
+ * What the page is told about a failure. Our own refusals say what is wrong with
+ * the SQL; anything from Zetaris may carry the start of its HTTP error body, so
+ * it becomes a fixed sentence and the detail goes to the server log.
+ */
+function publicMessage(error) {
+  if (error instanceof AskError) return error.message;
+  console.warn(`Ask the data: Zetaris could not run the query: ${error?.message || error}`);
+  return safeError(error);
+}
+
 /** `unsafe_sql` and `unauthorized` keep their code; any other failure is a query that did not run. */
 function failureCode(error) {
   if (error instanceof AskError) return error.code;
@@ -263,8 +275,9 @@ function createAskData({ zetaris, database, model }) {
         return { sql, result, attempts: attempt, ms: Date.now() - startedAt };
       } catch (error) {
         if (error?.code === 'unauthorized' || attempt === MAX_ATTEMPTS) {
-          throw new AskError(failureCode(error), error?.message || 'The query failed.', { sql: lastSql });
+          throw new AskError(failureCode(error), publicMessage(error), { sql: lastSql });
         }
+        // The model may read what went wrong; the page may not (see publicMessage).
         problem = error?.message || 'The query failed.';
       }
     }

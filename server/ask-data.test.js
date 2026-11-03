@@ -15,6 +15,8 @@ const {
   validateSql
 } = require('./ask-data');
 
+const { DEFAULT_ERROR } = require('./insights');
+
 const DB = 'selo';
 const GOOD = 'SELECT user_name, count(*) AS n FROM selo.comments GROUP BY user_name ORDER BY n DESC LIMIT 5';
 
@@ -263,24 +265,37 @@ test('unsafe SQL never reaches Zetaris, and the model gets one chance to fix it'
 
 test('two failed tries end as a failed query, with the last SQL for the user to see', async () => {
   const { model } = scriptedModel('SELECT a FROM selo.news', 'SELECT b FROM selo.news');
-  const zetaris = fakeZetaris(new Error('first'), new Error('second'));
+  const zetaris = fakeZetaris(new Error('first'), new Error('second: body {"trace":"secret"}'));
+  const warn = test.mock.method(console, 'warn', () => {});
 
-  await assert.rejects(createAskData({ zetaris, database: DB, model }).ask('Anything'), error => {
-    assert.equal(error.code, 'query_failed');
-    assert.equal(error.message, 'second');
-    assert.equal(error.sql, 'SELECT b FROM selo.news');
-    return true;
-  });
+  try {
+    await assert.rejects(createAskData({ zetaris, database: DB, model }).ask('Anything'), error => {
+      assert.equal(error.code, 'query_failed');
+      // Zetaris' own words stay in the server log; the page gets a fixed sentence.
+      assert.equal(error.message, DEFAULT_ERROR);
+      assert.ok(!error.message.includes('secret'));
+      assert.equal(error.sql, 'SELECT b FROM selo.news');
+      return true;
+    });
+  } finally {
+    warn.mock.restore();
+  }
+  assert.match(warn.mock.calls[0].arguments[0], /second: body/);
 });
 
 test('a refused Zetaris key stops at once instead of trying again', async () => {
   const { model, calls } = scriptedModel(GOOD);
-  const refused = Object.assign(new Error('Zetaris rejected the key'), { code: 'unauthorized' });
+  const refused = Object.assign(new Error('Zetaris rejected the key abc123'), { code: 'unauthorized' });
+  const warn = test.mock.method(console, 'warn', () => {});
 
-  await assert.rejects(
-    createAskData({ zetaris: fakeZetaris(refused), database: DB, model }).ask('Anything'),
-    error => error.code === 'unauthorized'
-  );
+  try {
+    await assert.rejects(
+      createAskData({ zetaris: fakeZetaris(refused), database: DB, model }).ask('Anything'),
+      error => error.code === 'unauthorized' && error.message === 'Zetaris rejected the API key.'
+    );
+  } finally {
+    warn.mock.restore();
+  }
   assert.equal(calls.length, 1);
 });
 

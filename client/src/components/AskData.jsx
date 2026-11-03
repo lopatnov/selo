@@ -122,6 +122,11 @@ function AskData() {
 
       {result && (
         <div data-testid="ask-result">
+          {result.stale && (
+            <div className="provider-alert warning" data-testid="ask-stale">
+              {result.notice}
+            </div>
+          )}
           <p className="ask-answer" data-testid="ask-answer">
             {result.answer}
           </p>

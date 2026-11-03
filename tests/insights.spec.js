@@ -254,6 +254,17 @@ test.describe('Ask the data', () => {
     expect(seen.questions).toEqual(['Who talks the most?']);
   });
 
+  test('warns when the answer may be a moment behind the app', async ({ page }) => {
+    await mockAsk(page, makeAnswer({ stale: true, notice: 'The latest changes are still being saved to Zetaris.' }));
+    await page.goto('/insights');
+
+    await page.getByLabel('Your question about the data').fill('Who talks the most?');
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+
+    await expect(page.getByTestId('ask-stale')).toHaveText('The latest changes are still being saved to Zetaris.');
+    await expect(page.getByTestId('ask-answer')).toBeVisible();
+  });
+
   test('an example asks straight away', async ({ page }) => {
     const seen = await mockAsk(page, makeAnswer());
     await page.goto('/insights');
