@@ -1246,7 +1246,7 @@ body {
   margin: 0.5rem 0 0;
   padding: 0.6rem;
   white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
   background: #f5f7fa;
   border-radius: 6px;
 }

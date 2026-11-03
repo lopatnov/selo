@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import API_BASE from '../api';
@@ -89,21 +89,33 @@ function Insights() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Only the newest request may update the page: the development build mounts
+  // twice, and an older answer arriving late must not replace a newer one.
+  const newest = useRef(0);
+
   const load = useCallback(async () => {
+    newest.current += 1;
+    const mine = newest.current;
     setLoading(true);
     try {
       const { data: body } = await axios.get(`${API_BASE}/insights`);
+      if (mine !== newest.current) return;
       setData(body);
       setError('');
     } catch (err) {
+      if (mine !== newest.current) return;
       setError(err.response?.data?.error || err.message || 'Failed to load the insights.');
     } finally {
-      setLoading(false);
+      if (mine === newest.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     load();
+    // Unmounting makes the request in flight an old one.
+    return () => {
+      newest.current += 1;
+    };
   }, [load]);
 
   const items = data?.items || [];
@@ -134,7 +146,13 @@ function Insights() {
 
       {error && <div className="provider-alert error">{error}</div>}
 
-      {data && data.available === false && (
+      {data?.stale && (
+        <div className="provider-alert warning" data-testid="insights-stale">
+          {data.notice}
+        </div>
+      )}
+
+      {data?.available === false && (
         <div className="provider-alert warning" data-testid="insights-unavailable">
           {data.reason} <Link to="/providers">Zetaris status</Link>
         </div>

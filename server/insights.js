@@ -41,7 +41,7 @@ const INSIGHTS = Object.freeze([
     sql: db =>
       `SELECT n.source_name AS source, count(DISTINCT n.id) AS news, count(c.id) AS comments ` +
       `FROM ${db}.news n LEFT JOIN ${db}.comments c ON c.news_id = n.id ` +
-      `GROUP BY n.source_name ORDER BY comments DESC, news DESC LIMIT 15`
+      `GROUP BY n.source_id, n.source_name ORDER BY comments DESC, news DESC LIMIT 15`
   },
   {
     id: 'busiest-news',
@@ -57,12 +57,13 @@ const INSIGHTS = Object.freeze([
   {
     id: 'personas',
     title: 'Who talks the most',
-    description: 'Comments per personality (summaries and errors left out) and their average length in characters.',
+    description:
+      'Comments per AI personality (summaries, errors and human comments left out) and their average length in characters.',
     kind: 'table',
     bar: 1,
     sql: db =>
       `SELECT user_name AS personality, count(*) AS comments, round(avg(CAST(text_length AS DOUBLE))) AS avg_chars ` +
-      `FROM ${db}.comments WHERE is_summary <> 'true' AND is_error <> 'true' ` +
+      `FROM ${db}.comments WHERE is_ai = 'true' AND is_summary <> 'true' AND is_error <> 'true' ` +
       `GROUP BY user_name ORDER BY comments DESC LIMIT 15`
   },
   {
@@ -124,15 +125,49 @@ function cell(value) {
 async function inParallel(items, size, task) {
   const results = new Array(items.length);
   let next = 0;
-  async function worker() {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      results[index] = await task(items[index]);
-    }
+  // Each worker takes the next item when its task is done.
+  function worker() {
+    if (next >= items.length) return Promise.resolve();
+    const index = next;
+    next += 1;
+    return task(items[index]).then(result => {
+      results[index] = result;
+      return worker();
+    });
   }
   await Promise.all(Array.from({ length: Math.min(size, items.length) }, worker));
   return results;
+}
+
+// What a card may say about a failed query. Zetaris puts the start of its HTTP
+// error body into the message, and this page is open to anyone, so the message
+// itself stays in the server log.
+const SAFE_ERRORS = new Map([
+  ['unauthorized', 'Zetaris rejected the API key.'],
+  ['offline', 'Zetaris is not reachable.']
+]);
+const DEFAULT_ERROR = 'Zetaris could not run this query. The server log has the details.';
+
+function safeError(error) {
+  return SAFE_ERRORS.get(error?.code) ?? DEFAULT_ERROR;
+}
+
+/**
+ * Are the numbers current? They come from the Zetaris tables, which the app fills
+ * with a short delay (and again later if Zetaris refused a save), so while a save
+ * is waiting the cards can be a little behind the app.
+ *
+ * @param {{ health?: string }} storage `persistence.status()`
+ */
+function describeFreshness({ health } = {}) {
+  if (health === 'synced') return { stale: false, notice: null };
+  if (health === 'degraded') {
+    return {
+      stale: true,
+      notice: 'Zetaris refused the last save, so these numbers may be behind the app until a save goes through.'
+    };
+  }
+  return { stale: true, notice: 'The latest changes are still being saved to Zetaris, so these numbers may be a moment behind.' };
 }
 
 /**
@@ -166,11 +201,12 @@ function createInsights({ zetaris, database }) {
         ms: Date.now() - startedAt
       };
     } catch (error) {
+      console.warn(`Insights: "${insight.id}" failed: ${error?.message || error}`);
       return {
         ...described,
         columns: [],
         rows: [],
-        error: error?.message || 'The query failed.',
+        error: safeError(error),
         ms: Date.now() - startedAt
       };
     }
@@ -184,4 +220,12 @@ function createInsights({ zetaris, database }) {
   return { run };
 }
 
-module.exports = { INSIGHTS, MAX_PARALLEL, ROW_LIMIT, createInsights };
+module.exports = {
+  DEFAULT_ERROR,
+  INSIGHTS,
+  MAX_PARALLEL,
+  ROW_LIMIT,
+  createInsights,
+  describeFreshness,
+  safeError
+};

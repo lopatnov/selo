@@ -154,6 +154,46 @@ test.describe('Insights page', () => {
     await expect(page.getByTestId('insight-totals').getByText('10', { exact: true })).toHaveCount(0);
   });
 
+  test('warns when Zetaris has not received the latest changes, and not otherwise', async ({ page }) => {
+    await mockInsights(
+      page,
+      makeInsights({ stale: true, notice: 'The latest changes are still being saved to Zetaris.' })
+    );
+    await page.goto('/insights');
+
+    await expect(page.getByTestId('insights-stale')).toHaveText('The latest changes are still being saved to Zetaris.');
+    await expect(page.getByTestId('insight-totals').getByText('138')).toBeVisible();
+  });
+
+  test('a current answer shows no warning', async ({ page }) => {
+    await mockInsights(page, makeInsights({ stale: false, notice: null }));
+    await page.goto('/insights');
+
+    await expect(page.getByTestId('insight-totals').getByText('138')).toBeVisible();
+    await expect(page.getByTestId('insights-stale')).toHaveCount(0);
+  });
+
+  test('a slow older answer never replaces the newest one', async ({ page }) => {
+    // The first request is slow and old; any later one is quick and new. The dev
+    // build asks twice on mount, so both are in flight together.
+    let calls = 0;
+    await page.route('**/api/insights', async route => {
+      calls += 1;
+      const first = calls === 1;
+      if (first) await new Promise(resolve => setTimeout(resolve, 1500));
+      const body = makeInsights();
+      body.items[0].rows = [[first ? 'OLD' : 'NEW', '138']];
+      await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(body) });
+    });
+    await page.goto('/insights');
+
+    await expect(page.getByTestId('insight-totals').getByText('NEW', { exact: true })).toBeVisible();
+    // Long enough for the slow answer to arrive; it must be ignored.
+    await page.waitForTimeout(2500);
+    await expect(page.getByTestId('insight-totals').getByText('NEW', { exact: true })).toBeVisible();
+    await expect(page.getByTestId('insight-totals').getByText('OLD', { exact: true })).toHaveCount(0);
+  });
+
   test('a server error is shown and the navigation has an Insights link', async ({ page }) => {
     await mockInsights(page, { error: 'boom' }, 500);
     await page.goto('/insights');
