@@ -205,3 +205,133 @@ test.describe('Insights page', () => {
     );
   });
 });
+
+function makeAnswer(overrides = {}) {
+  return {
+    question: 'Who talks the most?',
+    answer: 'Kate talks the most, with 106 comments.',
+    sql: 'SELECT user_name, count(*) AS n FROM selo.comments GROUP BY user_name ORDER BY n DESC LIMIT 5',
+    columns: ['user_name', 'n'],
+    rows: [
+      ['Kate', '106'],
+      ['David', null]
+    ],
+    total: 2,
+    attempts: 1,
+    ms: 412,
+    ...overrides
+  };
+}
+
+async function mockAsk(page, reply, status = 200) {
+  const seen = { questions: [] };
+  await page.route('**/api/ask-data', route => {
+    seen.questions.push(route.request().postDataJSON().question);
+    return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(reply) });
+  });
+  return seen;
+}
+
+test.describe('Ask the data', () => {
+  test.beforeEach(async ({ page }) => {
+    await mockInsights(page, makeInsights());
+  });
+
+  test('a question comes back as an answer, the rows and the SQL behind them', async ({ page }) => {
+    const seen = await mockAsk(page, makeAnswer());
+    await page.goto('/insights');
+
+    await page.getByLabel('Your question about the data').fill('Who talks the most?');
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+
+    const card = page.getByTestId('ask-data');
+    await expect(card.getByTestId('ask-answer')).toHaveText('Kate talks the most, with 106 comments.');
+    await expect(card.getByRole('row')).toHaveCount(3);
+    await expect(card.getByRole('row', { name: /David/ })).toContainText('–');
+    await card.getByText('SQL run by Zetaris').click();
+    await expect(card.getByText('GROUP BY user_name ORDER BY n DESC LIMIT 5')).toBeVisible();
+    await expect(card.getByText('412 ms')).toBeVisible();
+    expect(seen.questions).toEqual(['Who talks the most?']);
+  });
+
+  test('warns when the answer may be a moment behind the app', async ({ page }) => {
+    await mockAsk(page, makeAnswer({ stale: true, notice: 'The latest changes are still being saved to Zetaris.' }));
+    await page.goto('/insights');
+
+    await page.getByLabel('Your question about the data').fill('Who talks the most?');
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+
+    await expect(page.getByTestId('ask-stale')).toHaveText('The latest changes are still being saved to Zetaris.');
+    await expect(page.getByTestId('ask-answer')).toBeVisible();
+  });
+
+  test('an example asks straight away', async ({ page }) => {
+    const seen = await mockAsk(page, makeAnswer());
+    await page.goto('/insights');
+
+    await page.getByRole('button', { name: 'Which models failed the most, and why?' }).click();
+
+    await expect(page.getByTestId('ask-answer')).toBeVisible();
+    expect(seen.questions).toEqual(['Which models failed the most, and why?']);
+    await expect(page.getByLabel('Your question about the data')).toHaveValue('Which models failed the most, and why?');
+  });
+
+  test('says when the SQL had to be written again', async ({ page }) => {
+    await mockAsk(page, makeAnswer({ attempts: 2 }));
+    await page.goto('/insights');
+
+    await page.getByLabel('Your question about the data').fill('Who talks the most?');
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+
+    await expect(page.getByTestId('ask-data').getByText(/written again after an error \(attempt 2\)/)).toBeVisible();
+  });
+
+  test('an empty result still shows the answer, without a table', async ({ page }) => {
+    await mockAsk(page, makeAnswer({ answer: 'Nothing was found.', rows: [], total: 0 }));
+    await page.goto('/insights');
+
+    await page.getByLabel('Your question about the data').fill('Anything about Zetaris?');
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+
+    await expect(page.getByTestId('ask-answer')).toHaveText('Nothing was found.');
+    await expect(page.getByTestId('ask-data').getByRole('table')).toHaveCount(0);
+  });
+
+  test('a refused or failed question shows why and the last query it wrote', async ({ page }) => {
+    await mockAsk(
+      page,
+      { error: 'Only a SELECT query is allowed.', code: 'unsafe_sql', sql: 'DROP TABLE selo.news' },
+      422
+    );
+    await page.goto('/insights');
+
+    await page.getByLabel('Your question about the data').fill('Delete everything');
+    await page.getByRole('button', { name: 'Ask', exact: true }).click();
+
+    const error = page.getByTestId('ask-error');
+    await expect(error).toContainText('Only a SELECT query is allowed.');
+    await error.getByText('SQL run by Zetaris').click();
+    await expect(error.getByText('DROP TABLE selo.news')).toBeVisible();
+    await expect(page.getByTestId('ask-result')).toHaveCount(0);
+  });
+
+  test('a question needs a few words before Ask is enabled', async ({ page }) => {
+    await page.goto('/insights');
+
+    const button = page.getByRole('button', { name: 'Ask', exact: true });
+    await expect(button).toBeDisabled();
+    await page.getByLabel('Your question about the data').fill('ab');
+    await expect(button).toBeDisabled();
+    await page.getByLabel('Your question about the data').fill('abc');
+    await expect(button).toBeEnabled();
+  });
+
+  test('the card is not offered when the data is not in Zetaris', async ({ page }) => {
+    await page.unroute('**/api/insights');
+    await mockInsights(page, { available: false, reason: 'The app data is not stored in Zetaris.', items: [] });
+    await page.goto('/insights');
+
+    await expect(page.getByTestId('insights-unavailable')).toBeVisible();
+    await expect(page.getByTestId('ask-data')).toHaveCount(0);
+  });
+});
