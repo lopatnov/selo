@@ -143,6 +143,10 @@ test('extractSql takes the SQL from a fence, from prose, or from reasoning tags'
   assert.equal(extractSql('```sql\nSELECT 1 FROM selo.news\n```'), 'SELECT 1 FROM selo.news');
   assert.equal(extractSql('Here you go:\nSELECT 1 FROM selo.news'), 'SELECT 1 FROM selo.news');
   assert.equal(extractSql('<think>let me write select</think>SELECT 2 FROM selo.news'), 'SELECT 2 FROM selo.news');
+  assert.equal(extractSql('Sure:\n```SQL\nSELECT 3 FROM selo.news\n```\nDone.'), 'SELECT 3 FROM selo.news');
+  assert.equal(extractSql('```\nSELECT 4 FROM selo.news\n```'), 'SELECT 4 FROM selo.news');
+  // A fence that never closes is not a fence: the SQL is found from its first keyword.
+  assert.equal(extractSql('```sql\nSELECT 5 FROM selo.news'), 'SELECT 5 FROM selo.news');
   assert.equal(extractSql('I cannot do that.'), 'I cannot do that.');
   assert.equal(extractSql(undefined), '');
 });

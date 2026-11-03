@@ -36,6 +36,12 @@ function ResultTable({ columns, rows }) {
   );
 }
 
+/** "412 ms", plus a word when the model had to write the SQL again. */
+function queryNote({ ms, attempts }) {
+  if (attempts <= 1) return `${ms} ms`;
+  return `${ms} ms, written again after an error (attempt ${attempts})`;
+}
+
 function Sql({ sql, note }) {
   return (
     <details className="insights-sql">
@@ -72,14 +78,15 @@ function AskData() {
     }
   };
 
+  // `ask` handles its own errors, so the promise it returns is not needed here.
   const submit = event => {
     event.preventDefault();
-    ask(question);
+    void ask(question);
   };
 
   const useExample = example => {
     setQuestion(example);
-    ask(example);
+    void ask(example);
   };
 
   return (
@@ -131,10 +138,7 @@ function AskData() {
             {result.answer}
           </p>
           {result.rows.length > 0 && <ResultTable columns={result.columns} rows={result.rows} />}
-          <Sql
-            sql={result.sql}
-            note={`${result.ms} ms${result.attempts > 1 ? `, written again after an error (attempt ${result.attempts})` : ''}`}
-          />
+          <Sql sql={result.sql} note={queryNote(result)} />
         </div>
       )}
     </div>

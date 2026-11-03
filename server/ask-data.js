@@ -90,17 +90,20 @@ function repairNote(problem) {
 
 // --- the guard ---------------------------------------------------------------
 
-const FORBIDDEN_WORDS =
-  /\b(?:insert|update|delete|drop|create|alter|truncate|merge|grant|revoke|call|set|use|load|copy|export|refresh|cache|uncache|analyze|msck|reflect|java_method|try_reflect|call_udf|raise_error|assert_true|sleep)\b/i;
+// Statements that write, and engine functions that call out of the SQL engine.
+const FORBIDDEN_WORD_LIST =
+  'insert update delete drop create alter truncate merge grant revoke call set use load copy export refresh cache uncache analyze msck reflect java_method try_reflect call_udf raise_error assert_true sleep'.split(
+    ' '
+  );
+const FORBIDDEN_WORDS = new RegExp(String.raw`\b(?:${FORBIDDEN_WORD_LIST.join('|')})\b`, 'i');
 const QUOTED_TEXT = /'(?:[^']|'')*'/g;
-const TABLE_REFERENCE = /\b(?:from|join)\s+([A-Za-z_][\w$.]*)/gi;
+const TABLE_REFERENCE = /\b(?:from|join)\s+([a-z_][\w$.]*)/gi;
 const TOKEN = /[A-Za-z_][\w$.]*|[(),]|\S/g;
 // Words that end a FROM list; a comma inside the list would be a comma join.
-const ENDS_FROM_LIST = new Set([
-  ...['where', 'group', 'order', 'having', 'limit', 'union', 'intersect', 'except'],
-  ...['window', 'qualify', 'sort', 'cluster', 'distribute']
-]);
-const CTE_NAME = /(?:\bwith|,)\s+([A-Za-z_]\w*)\s+as\s*\(/gi;
+const ENDS_FROM_LIST = new Set(
+  'where group order having limit union intersect except window qualify sort cluster distribute'.split(' ')
+);
+const CTE_NAME = /(?:\bwith|,)\s+([a-z_]\w*)\s+as\s*\(/gi;
 const ENDS_WITH_LIMIT = /\blimit\s+\d+\s*$/i;
 
 function refuse(message) {
@@ -175,11 +178,21 @@ function validateSql(raw, database) {
   return ENDS_WITH_LIMIT.test(text) ? sql : `${sql} LIMIT ${ROW_LIMIT}`;
 }
 
+/** The text of the first ``` fence (without a leading `sql`), or `null`. Plain scanning, not a regex. */
+function fencedBlock(text) {
+  const open = text.indexOf('```');
+  if (open < 0) return null;
+  let start = open + 3;
+  if (text.slice(start, start + 3).toLowerCase() === 'sql') start += 3;
+  const close = text.indexOf('```', start);
+  return close < 0 ? null : text.slice(start, close).trim();
+}
+
 /** The SQL in a model reply: a fenced block, else everything from the first SELECT / WITH. */
 function extractSql(reply) {
   const { answer } = sanitizeModelText(reply);
-  const fenced = /```(?:sql)?\s*([\s\S]*?)```/i.exec(answer);
-  if (fenced) return fenced[1].trim();
+  const fenced = fencedBlock(answer);
+  if (fenced !== null) return fenced;
   const start = /\b(?:select|with)\b/i.exec(answer);
   return start ? answer.slice(start.index).trim() : answer.trim();
 }
