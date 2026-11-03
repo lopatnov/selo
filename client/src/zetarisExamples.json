@@ -49,6 +49,16 @@
           "sql": "SELECT substr(created_at, 1, 13) AS hour, count(*) AS comments FROM {db}.comments GROUP BY substr(created_at, 1, 13) ORDER BY hour DESC LIMIT 24"
         },
         {
+          "id": "per-day",
+          "label": "Comments per day: AI and human",
+          "sql": "SELECT substr(created_at, 1, 10) AS day, count(*) AS comments, sum(CASE WHEN is_ai = 'true' THEN 1 ELSE 0 END) AS ai, sum(CASE WHEN is_ai = 'true' THEN 0 ELSE 1 END) AS human FROM {db}.comments GROUP BY substr(created_at, 1, 10) ORDER BY day DESC LIMIT 14"
+        },
+        {
+          "id": "topic-mentions",
+          "label": "Mentions of a topic: news titles and comments (change 'nvidia')",
+          "sql": "SELECT 'news titles' AS found_in, count(*) AS mentions FROM {db}.news WHERE lower(title) LIKE '%nvidia%' UNION ALL SELECT 'comments', count(*) FROM {db}.comments WHERE lower(get_json_object(doc, '$.text')) LIKE '%nvidia%'"
+        },
+        {
           "id": "failed-answers",
           "label": "Agents with failed answers",
           "sql": "SELECT user_name, sum(CASE WHEN is_error = 'true' THEN 1 ELSE 0 END) AS errors, count(*) AS total FROM {db}.comments GROUP BY user_name ORDER BY errors DESC LIMIT 10"
@@ -62,6 +72,11 @@
           "id": "news-per-source",
           "label": "News per source",
           "sql": "SELECT source_name, count(*) AS news FROM {db}.news GROUP BY source_name ORDER BY news DESC"
+        },
+        {
+          "id": "discussion-by-source",
+          "label": "Discussion by RSS source: news joined with comments",
+          "sql": "SELECT CASE WHEN s.id IS NULL THEN concat(n.source_name, ' (removed)') ELSE n.source_name END AS source, count(DISTINCT n.id) AS news, count(c.id) AS comments FROM {db}.news n LEFT JOIN {db}.rss_sources s ON s.id = n.source_id LEFT JOIN {db}.comments c ON c.news_id = n.id GROUP BY n.source_id, n.source_name, s.id ORDER BY comments DESC, news DESC LIMIT 15"
         },
         {
           "id": "all-feeds",
@@ -85,8 +100,18 @@
         },
         {
           "id": "model-speed",
-          "label": "Meterless: calls and average seconds per model",
-          "sql": "SELECT model, count(*) AS calls, round(avg(CAST(duration_ms AS DOUBLE)) / 1000, 1) AS avg_seconds FROM {db}.meterless_log GROUP BY model ORDER BY calls DESC"
+          "label": "Meterless: calls, failures and average seconds per model",
+          "sql": "SELECT model, count(*) AS calls, sum(CASE WHEN error IS NULL OR error = '' THEN 0 ELSE 1 END) AS failed, round(avg(CAST(duration_ms AS DOUBLE)) / 1000, 1) AS avg_seconds FROM {db}.meterless_log GROUP BY model ORDER BY calls DESC"
+        },
+        {
+          "id": "why-failed",
+          "label": "Meterless: why requests failed",
+          "sql": "SELECT result, count(*) AS requests FROM (SELECT CASE WHEN error IS NULL OR error = '' THEN '(worked)' WHEN instr(error, ' (after') > 0 THEN substr(error, 1, instr(error, ' (after') - 1) ELSE error END AS result FROM {db}.meterless_log) t GROUP BY result ORDER BY requests DESC LIMIT 10"
+        },
+        {
+          "id": "reply-guard",
+          "label": "Meterless: replies the reply guard repaired or shortened",
+          "sql": "SELECT count(*) AS requests, sum(CASE WHEN get_json_object(doc, '$.reply.cap') IS NOT NULL THEN 1 ELSE 0 END) AS guarded, sum(CASE WHEN get_json_object(doc, '$.reply.retried') = 'true' THEN 1 ELSE 0 END) AS retried, sum(CASE WHEN get_json_object(doc, '$.reply.trimmed') = 'true' THEN 1 ELSE 0 END) AS shortened FROM {db}.meterless_log"
         },
         {
           "id": "slowest-calls",

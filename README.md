@@ -480,15 +480,30 @@ How it behaves:
 
 Look at it with SQL on the AI Provider page or in the Zetaris SQL editor. The
 **Example queries** dropdown on the page runs a ready-made query on the live data
-when you pick it: rows per table, the latest comments with their text, who talks
-the most, AI against human, the most discussed articles, comments per hour, failed
-answers, news from all feeds or from one feed (one entry per feed the app polls),
-feed health, the AI personalities, and Meterless calls per model, the slowest
-calls and the prompts the agents were asked. The comment text, the prompts and the
-other fields that have no column of their own are read out of `doc` with
+when you pick it. In four groups:
+
+- **Overview:** rows per table, the tables and the files behind them, the columns
+  of `comments`.
+- **Discussion:** the latest comments with their text, who talks the most, AI
+  against human, the most discussed articles, comments per hour and per day, failed
+  answers, and how often a topic is mentioned in news titles and comments (edit the
+  word in the SQL box).
+- **News and feeds:** news per source, discussion per source (news joined with
+  comments; a feed that was deleted and added again is marked "(removed)"), news
+  from all feeds or from one feed (one entry per feed the app polls), feed health.
+- **AI agents and Meterless:** the AI personalities, calls, failures and average
+  seconds per model, why requests failed, the replies the reply guard repaired or
+  shortened, the slowest calls and the prompts the agents were asked.
+
+The comment text, the prompts, the reply-guard fields and the other fields that
+have no column of their own are read out of `doc` with
 `get_json_object(doc, '$.text')`. The examples live in
-[`client/src/zetarisExamples.json`](client/src/zetarisExamples.json), and
-`npm run verify:storage` runs every one of them on a throw-away database.
+[`client/src/zetarisExamples.json`](client/src/zetarisExamples.json). `npm test`
+checks that each one is a single read-only statement on the `{db}` placeholder
+(and that the Ask the data guard would let it through), and
+`npm run verify:storage` runs every one of them on a throw-away database. The
+[Insights](#insights-questions-asked-of-zetaris) page runs similar questions for
+you.
 
 ```sql
 SELECT c.created_at, c.user_name, n.title, substr(get_json_object(c.doc, '$.text'), 1, 160) AS text FROM selo.comments c JOIN selo.news n ON c.news_id = n.id ORDER BY c.created_at DESC LIMIT 10
@@ -882,7 +897,7 @@ statement; `POST /api/zetaris/query` refuses anything that is not a single
 Verification:
 
 ```bash
-npm test                  # unit tests: provider, Zetaris contract, Zetaris storage and state store
+npm test                  # every unit test in server/: providers, Zetaris, storage, reply guard, Insights, Ask the data, examples
 npm run verify:storage    # live round trip of the app data through your Zetaris (throw-away database)
 npm run verify:race       # one small live Nightshift race through your Meterless Runtime (uses cloud lanes)
 npm run verify:provider   # live checks against a mock and, if present, a real runtime on 8088
@@ -972,36 +987,48 @@ first use (`GET /api/participant`), so nothing has to be signed in.
 ```
 ├── server/             # Node.js Express server
 │   ├── index.js        # HTTP API, WebSocket hub, RSS polling, discussion loop
+│   ├── load-env.js     # Loads .env for a host run (a value already in the environment is kept)
 │   ├── meterless-text.js # strips model reasoning (<think>) from replies
 │   ├── meterless-log.js  # ask / think / answer request log (saved in Zetaris, mirrored in a file)
+│   ├── reply-guard.js  # reply cap (SELO_MAX_REPLY_TOKENS), repair call, shortening, reasoning-only replies
+│   ├── prompt-guard.js # neutralises instruction-like text in news, comments and rows before a model sees it
+│   ├── html-entities.js # decodes &#8217; and friends in RSS titles (and repairs saved ones)
+│   ├── race-call.js    # a message written as a Nightshift race, with the normal call as fallback
+│   ├── app-settings.js # deployment-wide discussion settings (pipeline, lanes, race switches)
+│   ├── discussion-settings.js # per-personality discussion settings
+│   ├── activity.js     # live "who is talking to which model" counters
 │   ├── zetaris.js      # Zetaris REST client: SQL (POST /sql-editor/sqls/run) and files (/ndp-files/*)
 │   ├── zetaris-store.js # The app data as Zetaris tables: schema setup, save, load
 │   ├── persistence.js  # Zetaris first, local file as mirror and fallback; start-up reconciliation
-│   ├── zetaris.test.js # Contract unit tests
+│   ├── state-merge.js  # Adds records Zetaris holds that this server never loaded
 │   ├── state-store.js  # Atomic, debounced local JSON mirror (server/data/state.json)
-│   ├── state-store.test.js # Round-trip, corrupt-file and cap tests
+│   ├── insights.js     # The Insights page: eight read-only SQL questions answered by Zetaris
+│   ├── ask-data.js     # "Ask the data": question -> guarded SQL -> Zetaris -> answer
+│   ├── *.test.js       # Unit tests next to the module they cover (all run by `npm test`)
 │   ├── providers/      # AI provider registry (Meterless Runtime + hosted Meterless)
 │   │   ├── routes.js   # /api/providers router
 │   │   ├── settings-store.js # Provider settings file, including the runtime token
 │   │   ├── base-url.js # Base URL normalisation
-│   │   └── meterless-runtime.test.js
+│   │   ├── meterless-runtime.js # Runtime chat, models, classes and the Nightshift jobs plane
+│   │   └── meterless-race.js    # Submits a best_of_n race, polls it, takes the winner
 │   ├── Dockerfile      # Server image (node:24-alpine, multi-stage)
 │   ├── init/           # Zetaris init scripts
 │   └── initdb/         # PostgreSQL bootstrap SQL (audit DB)
 │
 ├── client/             # React frontend
 │   ├── src/            # Source files
-│   │   ├── App.jsx     # Routes: /feed, /sources, /users, /providers, /add-rss, /add-user
+│   │   ├── App.jsx     # Routes: /feed, /sources, /users, /providers, /insights, /add-rss, /add-user
 │   │   ├── api.js      # API/WebSocket base URLs + local participant
-│   │   ├── components/ # NewsFeed, SourcesList, UsersList, ProviderSettings, forms
+│   │   ├── components/ # NewsFeed, SourcesList, UsersList, ProviderSettings, Insights, AskData, forms
+│   │   ├── zetarisExamples.json # The "Example queries" dropdown on /providers
 │   │   ├── index.js    # Entry point
 │   │   └── App.css     # Styles
 │   ├── Dockerfile      # Multi-stage build (node:24-alpine -> nginx:alpine)
 │   ├── nginx.conf      # SPA fallback + asset caching
 │   └── package.json    # Client dependencies (dev server pinned to port 3002)
 │
-├── scripts/            # check-connections.cjs, smoke-test.cjs, verify-meterless-provider.cjs
-├── tests/              # Playwright integration tests (example.spec.js + package.json)
+├── scripts/            # check-connections, smoke-test, verify-meterless-provider, verify-zetaris-storage, verify-race, verify-live-flow
+├── tests/              # Playwright suites: feed.spec.js, providers.spec.js, insights.spec.js (+ a config each), example.spec.js
 ├── .vscode/
 │   ├── launch.json     # Server, Chrome, unit-test and script debug configurations
 │   ├── tasks.json      # Dev servers, tests, Playwright and Docker tasks
@@ -1039,6 +1066,8 @@ first use (`GET /api/participant`), so nothing has to be signed in.
 #    - ZETARIS_ORG_ID: <numeric organisation id that owns the key>
 #    - METERLESS_API_URL: https://api.meterless.ai/v1
 #    - METERLESS_API_KEY: <your key; also the Meterless Runtime token>
+#    - optional tuning, passed to the container by docker-compose.yml (see .env.example):
+#      SELO_MAX_REPLY_TOKENS, SELO_ASK_MODEL, SELO_MAX_CONCURRENT_TURNS, SELO_MAX_CONCURRENT_RACES
 
 # 3. Start the whole stack (Zetaris + our app):
 docker compose up --build -d
@@ -1133,7 +1162,7 @@ tasks in `.vscode/tasks.json`.
 | **Test: Zetaris client**              | Debugs [`server/zetaris.test.js`](server/zetaris.test.js:1)                                         |
 | **Test: Meterless Runtime provider**  | Debugs [`server/providers/meterless-runtime.test.js`](server/providers/meterless-runtime.test.js:1) |
 | **Test: current file**                | Debugs whatever test or script file is active                                                       |
-| **Unit tests: all**                   | Compound of the three unit suites                                                                   |
+| **Unit tests: all**                   | Compound of the state store, Zetaris client and Meterless provider suites (`npm test` runs them all) |
 | **Script: smoke test**                | Debugs [`scripts/smoke-test.cjs`](scripts/smoke-test.cjs:1) on port 3155                            |
 | **Script: check connections**         | Debugs [`scripts/check-connections.cjs`](scripts/check-connections.cjs:1)                           |
 | **Script: verify Meterless provider** | Debugs [`scripts/verify-meterless-provider.cjs`](scripts/verify-meterless-provider.cjs:1)           |

@@ -35,13 +35,16 @@ const INSIGHTS = Object.freeze([
   {
     id: 'comments-by-source',
     title: 'Discussion by RSS source',
-    description: 'The 15 sources with the most comments: news items kept and comments written under them.',
+    description:
+      'The 15 sources with the most comments: news items kept and comments written under them. A feed that was deleted and added again counts as two; the old one is marked "(removed)".',
     kind: 'table',
     bar: 2,
     sql: db =>
-      `SELECT n.source_name AS source, count(DISTINCT n.id) AS news, count(c.id) AS comments ` +
-      `FROM ${db}.news n LEFT JOIN ${db}.comments c ON c.news_id = n.id ` +
-      `GROUP BY n.source_id, n.source_name ORDER BY comments DESC, news DESC LIMIT 15`
+      `SELECT CASE WHEN s.id IS NULL THEN concat(n.source_name, ' (removed)') ELSE n.source_name END AS source, ` +
+      `count(DISTINCT n.id) AS news, count(c.id) AS comments ` +
+      `FROM ${db}.news n LEFT JOIN ${db}.rss_sources s ON s.id = n.source_id ` +
+      `LEFT JOIN ${db}.comments c ON c.news_id = n.id ` +
+      `GROUP BY n.source_id, n.source_name, s.id ORDER BY comments DESC, news DESC LIMIT 15`
   },
   {
     id: 'busiest-news',
